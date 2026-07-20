@@ -67,7 +67,9 @@ export BINDGEN_EXTRA_CLANG_ARGS_${RUST_TARGET_SUFFIX}="--target=${CLANG_PREFIX}$
 export RUSTFLAGS="-C link-arg=-Wl,-soname,libaether.so -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384 -C link-arg=-L${SYSROOT_LIB} -C link-arg=-L${SYSROOT}/usr/lib"
 
 echo "=== Building libaether.so for $ABI ==="
+pushd "$CRATE"
 cargo build --release --lib --target "$TARGET_TRIPLE"
+popd
 
 LIBRARY="$TARGET_DIR/$TARGET_TRIPLE/release/libaether.so"
 if [ ! -f "$LIBRARY" ]; then
