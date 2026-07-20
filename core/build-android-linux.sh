@@ -38,7 +38,11 @@ export ANDROID_NDK_ROOT="$NDK"
 export CMAKE="$CMAKE"
 export CMAKE_GENERATOR="Ninja"
 export CARGO_TARGET_DIR="$TARGET_DIR"
-export PATH="$(dirname "$CMAKE"):$PATH"
+export PATH="$(dirname "$CMAKE"):$BIN:$PATH"
+
+# ring/boring-sys look for aarch64-linux-android-clang (no API level) in PATH
+ln -sf "$BIN/${CLANG_PREFIX}24-clang" "$BIN/${CLANG_PREFIX}-clang"
+ln -sf "$BIN/${CLANG_PREFIX}24-clang++" "$BIN/${CLANG_PREFIX}-clang++"
 
 # Ensure Rust target installed
 rustup target add "$TARGET_TRIPLE"
