@@ -52,6 +52,7 @@ class MainActivity : Activity() {
     private lateinit var connectionTitle: TextView
     private lateinit var connectionDetail: TextView
     private lateinit var connectionLatency: TextView
+    private lateinit var connectionIp: TextView
     private lateinit var modeSelector: LinearLayout
     private lateinit var modeValue: TextView
     private lateinit var connectionTypeSelector: LinearLayout
@@ -127,6 +128,9 @@ class MainActivity : Activity() {
             isClickable = true
             isFocusable = true
             setOnClickListener { pingConnection() }
+        }
+        connectionIp = label("IP: —", 13f, MUTED).apply {
+            gravity = Gravity.CENTER
         }
         selectedProtocol = defaultProtocol()
         modeValue = label(selectedProtocol.label, 16f, INK, TypefaceStyle.MEDIUM)
@@ -263,11 +267,41 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun fetchPublicIp() {
+        Thread {
+            val info = runCatching {
+                val connection = URL("https://ipapi.co/json/").openConnection() as HttpURLConnection
+                try {
+                    connection.connectTimeout = 5000
+                    connection.readTimeout = 5000
+                    connection.requestMethod = "GET"
+                    check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
+                    val json = connection.inputStream.bufferedReader().readText()
+                    val ip = Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: "—"
+                    val country = Regex("\"country_code\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
+                    val flag = if (country.length == 2) {
+                        country.uppercase().map { cp ->
+                            String(Character.toChars(0x1F1E6 + (cp - 'A')))
+                        }.joinToString("")
+                    } else ""
+                    if (flag.isNotEmpty()) "$flag $ip" else ip
+                } finally {
+                    connection.disconnect()
+                }
+            }.getOrElse { "IP: unavailable" }
+            runOnUiThread {
+                if (visualState == ConnectionControl.State.CONNECTED) {
+                    connectionIp.text = "IP: $info"
+                }
+            }
+        }.start()
+    }
+
     private fun createHeader(): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
         val titles = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
-            addView(label("Aethery", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label("MSN-VPN", 22f, INK, TypefaceStyle.MEDIUM))
             addView(label("Private connection", 14f, MUTED), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -305,6 +339,10 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
+        addView(connectionIp, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(4) })
         addView(modeSelector, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(64),
@@ -937,7 +975,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { bottomMargin = dp(8) })
 
-        content.addView(label("Choose how Aethery connects", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label("Choose how MSN-VPN connects", 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
@@ -1109,12 +1147,6 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(0, dp(32), 0, 0)
         })
-        content.addView(createSettingsButton("Check for updates") {
-            appUpdater.checkForUpdate()
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(56),
-        ).apply { topMargin = dp(12) })
         content.addView(createSettingsButton("Kill Switch: ${if (killSwitchEnabled()) "ON" else "OFF"}") {
             val newValue = !killSwitchEnabled()
             getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putBoolean("kill_switch", newValue).apply()
@@ -1123,8 +1155,14 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(12) })
-        content.addView(createSettingsButton("Aethery on GitHub", R.drawable.ic_github) {
-            openLink("https://github.com/ZethRise/Aethery")
+        content.addView(createSettingsButton("Check for updates") {
+            appUpdater.checkForUpdate()
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(12) })
+        content.addView(createSettingsButton("MSN-VPN on GitHub", R.drawable.ic_github) {
+            openLink("https://github.com/mbm110/MSN-VPN")
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
@@ -1495,7 +1533,7 @@ class MainActivity : Activity() {
             addView(label("Split tunneling", 22f, INK, TypefaceStyle.MEDIUM))
         }
         content.addView(header)
-        content.addView(label("Choose which apps use Aethery. Changes apply next connection.", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label("Choose which apps use MSN-VPN. Changes apply next connection.", 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(20) })
@@ -1963,8 +2001,10 @@ class MainActivity : Activity() {
         connectionTitle.text = "Connected"
         connectionDetail.text = "${selectedProtocol.label} tunnel is active"
         connectionLatency.text = "Tap to measure latency"
+        connectionIp.text = "IP: —"
         setModeEnabled(false)
         pingConnection()
+        fetchPublicIp()
     }
 
     private fun showFailure(detail: String? = null) {
@@ -2135,7 +2175,7 @@ class MainActivity : Activity() {
         val settings = SplitTunnelSettings(this)
         val count = settings.packages().size
         return when (settings.mode()) {
-            SplitTunnelSettings.Mode.ALL -> "All apps use Aethery"
+            SplitTunnelSettings.Mode.ALL -> "All apps use MSN-VPN"
             SplitTunnelSettings.Mode.INCLUDE -> "Only $count selected app${if (count == 1) "" else "s"}"
             SplitTunnelSettings.Mode.EXCLUDE -> "Exclude $count selected app${if (count == 1) "" else "s"}"
         }

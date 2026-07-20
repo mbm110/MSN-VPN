@@ -72,7 +72,7 @@ class AetherVpnService : VpnService() {
                     val addresses = NativeCore.prepare(config)
                     ConnectionLog.record("Creating Android VPN interface")
                     tun = Builder()
-                        .setSession("Aethery")
+                        .setSession("MSN-VPN")
                         .setMtu(1280)
                         .addAddress(addresses.ipv4, 32)
                         .addAddress(addresses.ipv6, 128)
@@ -142,7 +142,7 @@ class AetherVpnService : VpnService() {
         try {
             tun?.close()
             tun = Builder()
-                .setSession("Aethery (Kill Switch)")
+                .setSession("MSN-VPN (Kill Switch)")
                 .setMtu(1280)
                 .addAddress("192.0.2.1", 32)   // TEST-NET-1, non-routable
                 .addRoute("0.0.0.0", 0)
@@ -283,7 +283,7 @@ class AetherVpnService : VpnService() {
         const val STATUS_DISCONNECTED = "disconnected"
         private const val CHANNEL_ID = "aethery_vpn"
         private const val NOTIFICATION_ID = 1
-        private const val LOG_TAG = "AetheryVpn"
+        private const val LOG_TAG = "MSN-VPNVpn"
     }
 }
 
