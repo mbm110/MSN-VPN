@@ -269,29 +269,41 @@ class MainActivity : Activity() {
 
     private fun fetchPublicIp() {
         Thread {
-            val info = runCatching {
-                val connection = URL("https://ipwho.is/").openConnection() as HttpURLConnection
-                try {
-                    connection.connectTimeout = 8000
-                    connection.readTimeout = 8000
-                    connection.requestMethod = "GET"
-                    check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
-                    val json = connection.inputStream.bufferedReader().readText()
-                    val ip = Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: "—"
-                    val country = Regex("\"country_code\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
-                    val flag = if (country.length == 2) {
+            val result = runCatching {
+                // IPv4 only (VPN may prefer IPv6, but we want the IPv4 exit)
+                val ipConn = URL("https://api.ipify.org?format=json").openConnection() as HttpURLConnection
+                val ip = try {
+                    ipConn.connectTimeout = 8000
+                    ipConn.readTimeout = 8000
+                    ipConn.requestMethod = "GET"
+                    check(ipConn.responseCode in 200..399) { "HTTP ${ipConn.responseCode}" }
+                    val json = ipConn.inputStream.bufferedReader().readText()
+                    Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: "—"
+                } finally {
+                    ipConn.disconnect()
+                }
+                // Country flag from ip-api.com (countryCode is IPv4-based and reliable)
+                val flag = try {
+                    val ccConn = URL("http://ip-api.com/json/?fields=countryCode").openConnection() as HttpURLConnection
+                    ccConn.connectTimeout = 8000
+                    ccConn.readTimeout = 8000
+                    ccConn.requestMethod = "GET"
+                    check(ccConn.responseCode in 200..399) { "HTTP ${ccConn.responseCode}" }
+                    val json = ccConn.inputStream.bufferedReader().readText()
+                    val country = Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
+                    if (country.length == 2) {
                         country.uppercase().map { cp ->
                             String(Character.toChars(0x1F1E6 + (cp - 'A')))
                         }.joinToString("")
                     } else ""
-                    if (flag.isNotEmpty()) "$flag $ip" else ip
                 } finally {
-                    connection.disconnect()
+                    ccConn.disconnect()
                 }
+                if (flag.isNotEmpty()) "$flag $ip" else ip
             }.getOrElse { "IP: unavailable" }
             runOnUiThread {
                 if (visualState == ConnectionControl.State.CONNECTED) {
-                    connectionIp.text = "IP: $info"
+                    connectionIp.text = "IP: $result"
                 }
             }
         }.start()
