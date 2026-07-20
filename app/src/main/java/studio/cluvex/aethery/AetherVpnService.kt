@@ -80,7 +80,7 @@ class AetherVpnService : VpnService() {
                         .addRoute("::", 0)
                         .addDnsServer("1.1.1.1")
                         .applySplitTunneling()
-                        .apply { if (killSwitchEnabled()) allowBypass(false) }
+                        .apply { if (!killSwitchEnabled()) allowBypass() }
                         .establish() ?: error("Android could not establish the VPN interface")
                     NativeCore.attach(this)
                     ConnectionLog.record("Scanning gateways for VPN")
@@ -148,7 +148,7 @@ class AetherVpnService : VpnService() {
                 .addRoute("0.0.0.0", 0)
                 .addRoute("::", 0)
                 .addDnsServer("192.0.2.1")     // sink DNS to nowhere
-                .allowBypass(false)
+                .allowBypass()
                 .establish()
             ConnectionLog.record("Kill Switch: unexpected disconnect, blocking all traffic")
             sendStatus("KILL_SWITCH_BLOCKED")
