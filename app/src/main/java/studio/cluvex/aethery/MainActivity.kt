@@ -270,10 +270,10 @@ class MainActivity : Activity() {
     private fun fetchPublicIp() {
         Thread {
             val info = runCatching {
-                val connection = URL("https://ipapi.co/json/").openConnection() as HttpURLConnection
+                val connection = URL("https://ipwho.is/").openConnection() as HttpURLConnection
                 try {
-                    connection.connectTimeout = 5000
-                    connection.readTimeout = 5000
+                    connection.connectTimeout = 8000
+                    connection.readTimeout = 8000
                     connection.requestMethod = "GET"
                     check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
                     val json = connection.inputStream.bufferedReader().readText()
