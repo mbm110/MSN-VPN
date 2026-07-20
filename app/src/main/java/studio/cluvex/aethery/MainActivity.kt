@@ -269,39 +269,26 @@ class MainActivity : Activity() {
 
     private fun fetchPublicIp() {
         Thread {
-            val result = runCatching {
-                // IPv4 only (VPN may prefer IPv6, but we want the IPv4 exit)
-                val ipConn = URL("https://api.ipify.org?format=json").openConnection() as HttpURLConnection
-                val ip = try {
-                    ipConn.connectTimeout = 8000
-                    ipConn.readTimeout = 8000
-                    ipConn.requestMethod = "GET"
-                    check(ipConn.responseCode in 200..399) { "HTTP ${ipConn.responseCode}" }
-                    val json = ipConn.inputStream.bufferedReader().readText()
-                    Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: "—"
-                } finally {
-                    ipConn.disconnect()
-                }
-                // Country flag from ip-api.com (countryCode is IPv4-based and reliable)
-                var ccConn: HttpURLConnection? = null
-                val flag = try {
-                    ccConn = URL("http://ip-api.com/json/?fields=countryCode").openConnection() as HttpURLConnection
-                    ccConn.connectTimeout = 8000
-                    ccConn.readTimeout = 8000
-                    ccConn.requestMethod = "GET"
-                    check(ccConn.responseCode in 200..399) { "HTTP ${ccConn.responseCode}" }
-                    val json = ccConn.inputStream.bufferedReader().readText()
-                    val country = Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
+            // Step 1: get IPv4 (HTTPS, always IPv4)
+            val ip = httpGet("https://api.ipify.org?format=json")?.let { json ->
+                Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
+            }
+            // Step 2: get country code for that IP (HTTPS)
+            val flag = if (ip != null) {
+                httpGet("https://api.country.is/$ip")?.let { json ->
+                    val country = Regex("\"country\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
                     if (country.length == 2) {
                         country.uppercase().map { cp ->
                             String(Character.toChars(0x1F1E6 + (cp - 'A')))
                         }.joinToString("")
                     } else ""
-                } finally {
-                    ccConn?.disconnect()
-                }
-                if (flag.isNotEmpty()) "$flag $ip" else ip
-            }.getOrElse { "IP: unavailable" }
+                } ?: ""
+            } else ""
+            val result = when {
+                ip != null && flag.isNotEmpty() -> "$flag $ip"
+                ip != null -> ip
+                else -> "unavailable"
+            }
             runOnUiThread {
                 if (visualState == ConnectionControl.State.CONNECTED) {
                     connectionIp.text = "IP: $result"
@@ -309,6 +296,20 @@ class MainActivity : Activity() {
             }
         }.start()
     }
+
+    private fun httpGet(url: String): String? = runCatching {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.requestMethod = "GET"
+            check(conn.responseCode in 200..399) { "HTTP ${conn.responseCode}" }
+            conn.inputStream.bufferedReader().readText()
+        } finally {
+            conn.disconnect()
+        }
+    }.getOrNull()
+
 
     private fun createHeader(): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
@@ -1160,11 +1161,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(0, dp(32), 0, 0)
         })
-        content.addView(createSettingsButton("Kill Switch: ${if (killSwitchEnabled()) "ON" else "OFF"}") {
-            val newValue = !killSwitchEnabled()
-            getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putBoolean("kill_switch", newValue).apply()
-            openSettingsScreen()
-        }, LinearLayout.LayoutParams(
+        content.addView(createKillSwitchRow(), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(12) })
@@ -2102,6 +2099,31 @@ class MainActivity : Activity() {
 
     private fun killSwitchEnabled(): Boolean =
         getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("kill_switch", false)
+
+    private fun createKillSwitchRow(): LinearLayout {
+        val checkbox = CheckBox(this).apply {
+            isChecked = killSwitchEnabled()
+            contentDescription = "Kill Switch"
+            setOnCheckedChangeListener { _, checked ->
+                getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
+                    .putBoolean("kill_switch", checked).apply()
+            }
+        }
+        return LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), 0, dp(8), 0)
+            background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { checkbox.isChecked = !checkbox.isChecked }
+            addView(label("Kill Switch", 15f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f,
+            ))
+            addView(checkbox, LinearLayout.LayoutParams(dp(48), dp(48)))
+        }
+    }
 
     private fun createSettingsButton(
         text: String,
