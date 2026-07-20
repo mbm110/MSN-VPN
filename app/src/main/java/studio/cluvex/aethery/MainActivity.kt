@@ -225,7 +225,7 @@ class MainActivity : Activity() {
     private fun showOpeningOverlay() {
         val overlay = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
         overlay.addView(ImageView(this).apply {
-            setImageResource(R.drawable.aethery_launcher)
+            setImageResource(R.drawable.msnvpn_launcher)
             scaleType = ImageView.ScaleType.CENTER_INSIDE
         }, FrameLayout.LayoutParams(dp(128), dp(128), Gravity.CENTER))
         pageHost.addView(overlay)
