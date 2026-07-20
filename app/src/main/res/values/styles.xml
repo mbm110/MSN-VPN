@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.MSN-VPN" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.MSNVPN" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="colorPrimary">#A4D8BB</item>
         <item name="colorOnPrimary">#07351E</item>
@@ -11,20 +11,20 @@
         <item name="android:statusBarColor">#101411</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
-        <item name="materialAlertDialogTheme">@style/ThemeOverlay.MSN-VPN.AlertDialog</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.MSNVPN.AlertDialog</item>
     </style>
 
-    <style name="Theme.MSN-VPN.Starting" parent="Theme.SplashScreen">
+    <style name="Theme.MSNVPN.Starting" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">#101411</item>
         <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
-        <item name="postSplashScreenTheme">@style/Theme.MSN-VPN</item>
+        <item name="postSplashScreenTheme">@style/Theme.MSNVPN</item>
     </style>
 
-    <style name="ThemeOverlay.MSN-VPN.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
-        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.MSN-VPN.Dialog</item>
+    <style name="ThemeOverlay.MSNVPN.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.MSNVPN.Dialog</item>
     </style>
 
-    <style name="ShapeAppearance.MSN-VPN.Dialog" parent="ShapeAppearance.Material3.MediumComponent">
+    <style name="ShapeAppearance.MSNVPN.Dialog" parent="ShapeAppearance.Material3.MediumComponent">
         <item name="cornerSize">28dp</item>
     </style>
 </resources>

@@ -15,13 +15,13 @@
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="Aethery"
+        android:label="MSN-VPN"
         android:roundIcon="@mipmap/ic_launcher"
-        android:theme="@style/Theme.Aethery">
+        android:theme="@style/Theme.MSNVPN">
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.Aethery.Starting">
+            android:theme="@style/Theme.MSNVPN.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
