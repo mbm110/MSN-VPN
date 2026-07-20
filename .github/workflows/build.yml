@@ -1,4 +1,4 @@
-name: Build Aethery Kill Switch
+name: Build MSN-VPN
 
 on:
   push:
@@ -40,5 +40,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Aethery-KillSwitch
+          name: MSN-VPN
           path: app/build/outputs/apk/debug/*.apk
