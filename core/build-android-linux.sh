@@ -27,7 +27,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CRATE="$ROOT/core/aether"
 TARGET_DIR="$CRATE/target-android"
 
-SDK="/tmp/android-sdk"
+SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+if [ -z "$SDK" ]; then
+  echo "ANDROID_HOME not set" >&2
+  exit 1
+fi
 NDK="$SDK/ndk/26.3.11579264"
 BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 CMAKE="$SDK/cmake/3.22.1/bin/cmake"
