@@ -283,8 +283,9 @@ class MainActivity : Activity() {
                     ipConn.disconnect()
                 }
                 // Country flag from ip-api.com (countryCode is IPv4-based and reliable)
+                var ccConn: HttpURLConnection? = null
                 val flag = try {
-                    val ccConn = URL("http://ip-api.com/json/?fields=countryCode").openConnection() as HttpURLConnection
+                    ccConn = URL("http://ip-api.com/json/?fields=countryCode").openConnection() as HttpURLConnection
                     ccConn.connectTimeout = 8000
                     ccConn.readTimeout = 8000
                     ccConn.requestMethod = "GET"
@@ -297,7 +298,7 @@ class MainActivity : Activity() {
                         }.joinToString("")
                     } else ""
                 } finally {
-                    ccConn.disconnect()
+                    ccConn?.disconnect()
                 }
                 if (flag.isNotEmpty()) "$flag $ip" else ip
             }.getOrElse { "IP: unavailable" }
