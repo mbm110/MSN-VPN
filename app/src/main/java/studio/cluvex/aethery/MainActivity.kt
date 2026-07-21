@@ -1177,7 +1177,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(28) })
-        content.addView(createCheckRow("Data usage", formatData(totalData(0L), totalData(1L))) {},
+        content.addView(createCheckRow("Data usage", dataUsageSummary()) {},
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(8) })
         content.addView(createCheckRow("Auto reconnect", autoReconnectEnabled(),
             { toggle("auto_reconnect") }) {},
@@ -2156,12 +2156,6 @@ class MainActivity : Activity() {
     private fun killSwitchEnabled(): Boolean =
         getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("kill_switch", false)
 
-    private fun appVersion(): String =
-        packageManager.getPackageInfo(packageName, 0).versionName ?: "Unknown"
-
-    private fun killSwitchEnabled(): Boolean =
-        getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("kill_switch", false)
-
     private fun autoReconnectEnabled(): Boolean =
         getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("auto_reconnect", true)
 
@@ -2171,12 +2165,10 @@ class MainActivity : Activity() {
     private fun bypassIranEnabled(): Boolean =
         getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("bypass_iran", false)
 
-    private fun totalData(rxFirst: Long, txFirst: Long): Pair<Long, Long> {
+    private fun dataUsageSummary(): String {
         val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        return Pair(prefs.getLong("total_rx", 0), prefs.getLong("total_tx", 0))
-    }
-
-    private fun formatData(rx: Long, tx: Long): String {
+        val rx = prefs.getLong("total_rx", 0)
+        val tx = prefs.getLong("total_tx", 0)
         fun fmt(bytes: Long): String = when {
             bytes < 1_024 -> "$bytes B"
             bytes < 1_048_576 -> "${bytes / 1_024} KB"
