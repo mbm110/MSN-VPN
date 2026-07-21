@@ -1,141 +1,155 @@
-# MSN-VPN
+# 🛡️ MSN-VPN
 
 <p align="center">
-  <img src="app/src/main/res/drawable-nodpi/msnvpn_launcher.png" width="112" alt="MSN-VPN icon">
+  <img src="app/src/main/res/drawable-nodpi/msnvpn_launcher.png" width="120" alt="MSN-VPN icon">
 </p>
 
-<p align="center">
-  Native Android client for private, censorship-resistant connections.
+<p align="center" dir="rtl">
+  <b>کلاینت نیتیو اندروید برای اتصال امن، خصوصی و عبور از فیلترینگ</b>
 </p>
 
 <p align="center">
   <a href="https://github.com/mbm110/MSN-VPN/releases"><img src="https://img.shields.io/github/v/release/mbm110/MSN-VPN?display_name=tag&style=for-the-badge&color=74c69d" alt="Release"></a>
   <a href="https://github.com/mbm110/MSN-VPN/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/mbm110/MSN-VPN/build.yml?branch=master&style=for-the-badge&label=Android%20build" alt="Android build"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-6c5ce7?style=for-the-badge" alt="AGPL-3.0"></a>
+  <a href="https://github.com/CluvexStudio/Aether"><img src="https://img.shields.io/badge/core-Aether-101411?style=for-the-badge" alt="Aether core"></a>
 </p>
 
-> **MSN-VPN** is an Android app built around the **Aether** network core — a private, censorship-resistant connection engine. It provides the native Android interface, VPN/TUN bridge, connection state, protocol picker, live logs, and release packaging.
+---
 
-## What MSN-VPN does
+<br>
 
-MSN-VPN turns Aether into an Android-first VPN experience. It provides the native interface, Android VPN/TUN bridge, connection state, protocol picker, live connection logs, and release packaging.
+<div dir="rtl">
 
-```text
-Android UI + Android VPN/TUN
-            │
-            ▼
-      MSN-VPN client
-            │ JNI
-            ▼
- Aether core — discovery, MASQUE, WireGuard, routing
-```
+## 📋 معرفی
+**MSN-VPN** یک اپلیکیشن VPN اندرویدی متن‌باز، سبک و قدرتمنده که با هسته‌ی **Aether** (نوشته‌شده با Rust) کار می‌کنه. این برنامه رابط کاربری مدرن اندروید، تونل VPN/TUN نیتیو، انتخاب پروتکل، نمایش لحظه‌ای وضعیت اتصال و انتشار نسخه‌ها رو در خودش داره.
 
-## Highlights
+<br>
 
-- **Native Android UI** with one-tap connect, connection state, motion, and live logs.
-- **Connection type picker**: **VPN** routes device traffic through Android `VpnService`; **Proxy** exposes local SOCKS5 at `127.0.0.1:1819` by default for apps configured to use it.
-- **MASQUE** over HTTP/3, with HTTP/2 fallback when available.
-- **WireGuard** for networks where it is reachable.
-- **WARP-on-WARP** (`gool`) support through the Aether core.
-- **Automatic endpoint scanning** with IP-level diagnostics, cached-gateway reconnect, and Ironclad verification.
-- **Kill Switch** — a settings toggle that blocks all traffic if the tunnel drops unexpectedly, preventing any unencrypted leak until reconnection or manual disconnect.
-- **Live IP & country** — after connecting, the main screen shows your public IP address and the country flag of the exit node.
-- Retained Aether v1.3.0 Android FFI core builds into `libaether.so`.
-- App-level default protocol setting and direct links to releases/source.
+## ✨ قابلیت‌های اصلی
 
-## Kill Switch
+| ⚡ | توضیح |
+|---|---|
+| **🔘 اتصال یک‌لمسی** | با یه ضربه وصل شو، با یه ضربه قطع کن — رابط کاربری روان و مدرن |
+| **🌐 حالت VPN** | کل ترافیک دستگاه از تونل عبور می‌کنه |
+| **🧩 حالت Proxy** | پروکسی SOCKS5 محلی روی `127.0.0.1:1819` برای استفاده اپ‌های دلخواه |
+| **🔀 Split Tunneling** | انتخاب کنید کدوم اپ‌ها از VPN عبور کنن و کدوم‌ها مستقیم برن |
+| **🛡️ Kill Switch** | **ویژه MSN-VPN** — اگه تونل قطع شه، ترافیک هیچ جا درز نمی‌کنه |
+| **🌍 نمایش IP + پرچم** | **ویژه MSN-VPN** — بعد اتصال، IP عمومی (IPv4) و پرچم کشور رو می‌بینید |
+| **📶 نمایش پینگ** | **ویژه MSN-VPN** — تأخیر اتصال رو زنده نشون میده |
+| **🔔 نوتیفیکیشن زنده** | سرعت لحظه‌ای آپلود/دانلود + دکمه قطع مستقیم از نوتیفیکیشن |
+| **📜 لاگ زنده** | جزئیات کامل اتصال، اسکن و تونل |
+| **⬆️ بروزرسانی درون‌برنامه‌ای** | بدون نیاز به گیت‌هاب، مستقیم از تنظیمات آپدیت کنید |
+| **🎨 Material 3** | طراحی مدرن با رنگ‌های داینامیک هماهنگ با تم گوشی |
 
-The Kill Switch is available in **Settings → Kill Switch** (above "Check for updates").
+<br>
 
-- **ON**: if the VPN tunnel drops for any reason other than your manual disconnect, the app immediately builds a *blocking* tunnel that routes all traffic (0.0.0.0/0) to a non-routable dummy address. No traffic can leak to the open internet. The service stays alive and reconnects automatically.
-- **OFF**: traffic may fall back to the default network when the tunnel is down (standard Android behaviour).
+## 🔒 Kill Switch (ویژه MSN-VPN)
 
-Implementation is **Kotlin-only** — the native Rust core is untouched. The switch controls `VpnService.Builder` (bypass disabled when active) and intercepts unexpected disconnects inside the Kotlin `VpnService` wrapper.
+> کیل سوییچ یک ویژگی **امنیتی حیاتی** است که بعد از اتصال از درز اطلاعات شمار جلوگیری می کند.
 
-## Protocol notes
+- ✅ توی **Settings** یک چک‌باکس واقعی داره — روش بزن تا فعال بشه
+- ✅ اگه تونل VPN به هر دلیلی قطع بشه (به جز قطع دستی خودتون)، بلافاصله یه تونل مسدودکننده ساخته میشه که **هیچ بسته‌ای به اینترنت باز خارج نمیشه**
+- ✅ هیچ ترافیکی نشت نمی‌کنه تا وقتی که اتصال دوباره برقرار بشه یا خودتون قطع کنید
+- ✅ بدون Kill Switch اگه VPN قطع بشه، ترافیک به صورت عادی از شبکه اصلی عبور می‌کنه
 
-| Protocol | Intended use |
-| --- | --- |
-| MASQUE | Recommended default. Uses HTTPS-like tunnel transport and can fall back to HTTP/2. |
-| WireGuard | Fast direct transport where UDP/WireGuard is reachable. |
-| WARP-on-WARP | Nested WireGuard transport supplied by Aether. It still needs a reachable outer WireGuard path. |
+<br>
 
-Network filtering differs by provider and location. A protocol appearing connected means Aether completed its tunnel readiness check; it does not promise that every destination is reachable on every network.
+## 🌍 مشاهده IP و پرچم کشور (ویژه MSN-VPN)
 
-## Download
+بعد از اتصال موفق، در پایین دکمه اتصال خواهید دید:
+- **آی‌پی عمومی** (نسخه ۴)
+- **پرچم کشور** سرور خروجی
+- **پینگ** اتصال
 
-Pre-built debug APKs are available from [GitHub Releases](https://github.com/mbm110/MSN-VPN/releases).
+این اطلاعات از طریق APIهای امن (HTTPS) دریافت میشه و کاملاً در لحظه به‌روز می‌شه.
 
-| Device ABI | Asset |
-| --- | --- |
-| 64-bit ARM | `app-arm64-v8a-debug.apk` |
-| 32-bit ARM | `app-armeabi-v7a-debug.apk` |
+<br>
 
-Install an APK from Android Downloads after allowing installs from the source application when Android asks.
+## 🔌 پروتکل‌های پشتیبانی‌شده
 
-## Build from source
+| پروتکل | کاربرد |
+|---|---|
+| **MASQUE** | پیش‌فرض توصیه‌شده. روی HTTP/3 با fallback خودکار به HTTP/2 |
+| **WireGuard** | پروتکل سریع مستقیم در شبکه‌هایی که UDP در دسترسه |
+| **WARP-on-WARP** | تونل تو در توی WireGuard از طریق هسته Aether |
 
-### Requirements
+> 💡 **نکته:** فیلترینگ شبکه بسته به مکان و اپراتور فرق داره. اگه یک پروتکل وصل نمیشه، پروتکل دیگه رو امتحان کن.
 
-- Android Studio with Android SDK 36
+<br>
+
+## 📥 دانلود و نصب
+
+<p align="center">
+  <a href="https://github.com/mbm110/MSN-VPN/releases/latest"><code>⬇️ دریافت آخرین نسخه از گیت‌هاب</code></a>
+</p>
+
+| نوع دستگاه | فایل مورد نیاز |
+|---|---|
+| گوشی‌های امروزی (۶۴ بیتی) | `app-arm64-v8a-debug.apk` |
+| گوشی‌های قدیمی (۳۲ بیتی) | `app-armeabi-v7a-debug.apk` |
+
+📌 فایل APK رو از بخش Releases دانلود کنید و نصب کنید. موقع نصب اگه اندروید اجازه خواست، Allow رو بزنید.
+
+<br>
+
+## 🛠️ بیلد از سورس
+
+### نیازمندی‌ها
+- Android Studio + Android SDK 36
 - Android NDK `26.3.11579264`
 - CMake `3.22.1`
 - JDK 17
-- Rust stable with required Android targets:
-
+- Rust stable + targets اندروید:
   ```bash
   rustup target add aarch64-linux-android armv7-linux-androideabi
   ```
 
-- `cargo-ndk` (optional — the included `core/build-android-linux.sh` drives the NDK clang toolchain directly)
-
-### Build APKs
-
-Gradle builds and stages the matching Aether library automatically:
-
+### دستورات بیلد
 ```bash
-# Both ABIs
+# هر دو نسخه (ARM64 + ARMv7)
 ./gradlew assembleDebug
 
-# Single ABI
+# فقط یک نسخه
 ./gradlew assembleDebug -PtargetAbi=arm64-v8a
 ./gradlew assembleDebug -PtargetAbi=armeabi-v7a
+
+# خروجی:
+# app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+# app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
 ```
 
-APK output:
+<br>
 
-```text
-app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
-app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
+## 📂 ساختار پروژه
+
+```
+app/                 لایه اندروید (Kotlin) و پل JNI
+core/aether/         هسته شبکه Aether (Rust)
+core/quiche/         کتابخانه QUIC/HTTP3 (وابستگی Aether)
+.github/             workflow بیلد خودکار
 ```
 
-### CI build
+<br>
 
-The [build workflow](.github/workflows/build.yml) runs on push and manually, building debug APKs for `arm64-v8a` and `armeabi-v7a`, then uploads them as a GitHub Actions artifact.
+## 📜 مجوز
 
-## Project layout
+MSN-VPN تحت لایسنس **GNU AGPL-3.0** منتشر شده است. هسته Aether و وابستگی‌های دیگر لایسنس‌های خود را دارند.
 
-```text
-app/                 Android application and JNI bridge
-core/aether/         Aether Rust core used by this client
-core/quiche/         QUIC/HTTP3 dependency used by Aether
-.github/             build workflow
-```
+<br>
 
-## Contributing
+## 🙏 تشکر از
 
-Read CONTRIBUTING.md before opening an issue or pull request.
+- [Aether](https://github.com/CluvexStudio/Aether) — هسته شبکه قدرتمند
+- [quiche](https://github.com/cloudflare/quiche) — کتابخانه QUIC و HTTP/3
+- [ZethRise](https://github.com/ZethRise) — سازنده اصلی Aethery که این پروژه از روی آن ساخته شده
 
-## Security
+<br>
 
-Do not disclose security-sensitive tunnel, credential, or traffic issues in public issues.
+---
 
-## License
+<p align="center">
+  ساخته شده با ❤️ برای کاربران آزادی‌خواه اینترنت
+</p>
 
-MSN-VPN is licensed under [GNU AGPL-3.0](LICENSE). Aether and bundled dependencies retain their own license terms; see their respective files in `core/`.
-
-## Credits
-
-- [Aether](https://github.com/CluvexStudio/Aether) — network core.
-- [quiche](https://github.com/cloudflare/quiche) — QUIC and HTTP/3 library used by Aether.
-- Built by [mbm110](https://github.com/mbm110).
+</div>
