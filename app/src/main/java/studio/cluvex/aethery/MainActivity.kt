@@ -86,19 +86,21 @@ class MainActivity : Activity() {
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
     private var latencyRequest = 0
     private val timerHandler = Handler(Looper.getMainLooper())
-    private val timerRunnable = Runnable {
-        val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        val elapsed = prefs.getLong("session_start", 0)
-        if (elapsed > 0) {
-            val now = SystemClock.elapsedRealtime()
-            val secs = (now - elapsed) / 1000
-            val h = secs / 3600
-            val m = (secs % 3600) / 60
-            val s = secs % 60
-            connectionTimer.text = if (h > 0) "$h:%02d:%02d".format(m, s) else "%02d:%02d".format(m, s)
+    private val timerRunnable = object : Runnable {
+        override fun run() {
+            val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+            val elapsed = prefs.getLong("session_start", 0)
+            if (elapsed > 0) {
+                val now = SystemClock.elapsedRealtime()
+                val secs = (now - elapsed) / 1000
+                val h = secs / 3600
+                val m = (secs % 3600) / 60
+                val s = secs % 60
+                connectionTimer.text = if (h > 0) "$h:%02d:%02d".format(m, s) else "%02d:%02d".format(m, s)
+            }
+            refreshUsageDisplay()
+            timerHandler.postDelayed(this, 1000)
         }
-        refreshUsageDisplay()
-        timerHandler.postDelayed(this, 1000)
     }
     private var sessionStartTime = 0L
     private val CANVAS by lazy { dynamicColor(android.R.color.system_neutral1_900, FALLBACK_CANVAS) }
