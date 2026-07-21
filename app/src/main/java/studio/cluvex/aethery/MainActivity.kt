@@ -1177,19 +1177,19 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(28) })
-        content.addView(createCheckRow("Data usage", dataUsageSummary()) {},
+        content.addView(createCheckRow("Data usage", dataUsageSummary()),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(8) })
         content.addView(createCheckRow("Auto reconnect", autoReconnectEnabled(),
-            { toggle("auto_reconnect") }) {},
+            { toggle("auto_reconnect") }),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
         content.addView(createCheckRow("Ad Blocker (DNS)", adBlockerEnabled(),
-            { toggle("ad_blocker") }) {},
+            { toggle("ad_blocker") }),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
         content.addView(createCheckRow("Bypass Iranian apps", bypassIranEnabled(),
-            { toggle("bypass_iran") }) {},
+            { toggle("bypass_iran") }),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
         content.addView(createCheckRow("Kill Switch", killSwitchEnabled(),
-            { toggle("kill_switch") }) {},
+            { toggle("kill_switch") }),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
 
         content.addView(label("Version ${appVersion()}", 14f, MUTED).apply {
