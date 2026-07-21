@@ -86,7 +86,20 @@ class MainActivity : Activity() {
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
     private var latencyRequest = 0
     private val timerHandler = Handler(Looper.getMainLooper())
-    private lateinit var timerRunnable: Runnable
+    private val timerRunnable = Runnable {
+        val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+        val elapsed = prefs.getLong("session_start", 0)
+        if (elapsed > 0) {
+            val now = SystemClock.elapsedRealtime()
+            val secs = (now - elapsed) / 1000
+            val h = secs / 3600
+            val m = (secs % 3600) / 60
+            val s = secs % 60
+            connectionTimer.text = if (h > 0) "$h:%02d:%02d".format(m, s) else "%02d:%02d".format(m, s)
+        }
+        refreshUsageDisplay()
+        timerHandler.postDelayed(this, 1000)
+    }
     private var sessionStartTime = 0L
     private val CANVAS by lazy { dynamicColor(android.R.color.system_neutral1_900, FALLBACK_CANVAS) }
     private val SURFACE by lazy { dynamicColor(android.R.color.system_neutral1_800, FALLBACK_SURFACE) }
@@ -2081,23 +2094,7 @@ class MainActivity : Activity() {
     }
 
     private fun startTimerUpdates() {
-timerHandler.removeCallbacks(timerRunnable)
-        timerRunnable = object : Runnable {
-            override fun run() {
-                if (visualState != ConnectionControl.State.CONNECTED) return
-                // Read elapsed from broadcast extra or compute from SharedPreferences
-                // We use a simple approach: read from the service's saved start time
-                val elapsed = SystemClock.elapsedRealtime() - sessionStartTime
-                if (elapsed > 0) {
-                    val totalSec = elapsed / 1000
-                    val h = totalSec / 3600
-                    val m = (totalSec % 3600) / 60
-                    val s = totalSec % 60
-                    connectionTimer.text = if (h > 0) "$h:%02d:%02d".format(m, s) else "%02d:%02d".format(m, s)
-                }
-                timerHandler.postDelayed(this, 1000)
-            }
-        }
+        timerHandler.removeCallbacks(timerRunnable)
         timerHandler.post(timerRunnable)
     }
 

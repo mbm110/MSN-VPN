@@ -51,8 +51,9 @@ class AetherVpnService : VpnService() {
                 sessionStartMs = SystemClock.elapsedRealtime()
                 sessionRxBytes = 0
                 sessionTxBytes = 0
-                // Save config for Quick Settings Tile
+                // Save session start time and config
                 getSharedPreferences("settings", MODE_PRIVATE).edit()
+                    .putLong("session_start", sessionStartMs)
                     .putString("saved_config", intent.getStringExtra(EXTRA_CONFIG))
                     .putBoolean("saved_vpn_mode", intent.getBooleanExtra(EXTRA_VPN_MODE, true))
                     .apply()
@@ -153,6 +154,8 @@ class AetherVpnService : VpnService() {
         trafficCheck?.cancel(true)
         trafficCheck = null
         NativeCore.stop()
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putLong("session_start", 0L).apply()
         saveSessionDataUsage()
 
         // Kill Switch: block traffic if unexpected disconnect
@@ -192,6 +195,8 @@ class AetherVpnService : VpnService() {
                     userInitiatedDisconnect.set(false)
                     // Re-start the tunnel from the same process (don't use ACTION_CONNECT intent)
                     sessionStartMs = SystemClock.elapsedRealtime()
+                    getSharedPreferences("settings", MODE_PRIVATE).edit()
+                        .putLong("session_start", sessionStartMs).apply()
                     startTunnel(savedConfig, getSharedPreferences("settings", MODE_PRIVATE)
                         .getBoolean("saved_vpn_mode", true))
                 }
