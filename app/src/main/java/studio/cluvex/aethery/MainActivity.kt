@@ -306,8 +306,8 @@ class MainActivity : Activity() {
             }
             // Step 2: get country code for that IP (HTTPS)
             val flag = if (ip != null) {
-                httpGet("http://ip-api.com/json/$ip?fields=countryCode")?.let { json ->
-                    val country = Regex("\"countryCode\"\\s*:\\s*\"([^\\\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
+                httpGet("https://ipapi.co/$ip/country_code/")?.let { raw ->
+                    val country = raw.trim().take(2)
                     if (country.length == 2) {
                         country.uppercase().map { cp ->
                             String(Character.toChars(0x1F1E6 + (cp - 'A')))

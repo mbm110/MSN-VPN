@@ -250,17 +250,7 @@ class AetherVpnService : VpnService() {
     }
 
     private fun saveSessionDataUsage() {
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        val rx = currentRxBytes()
-        val tx = currentTxBytes()
-        val sessionRx = (rx - lastRxBytes).coerceAtLeast(0L)
-        val sessionTx = (tx - lastTxBytes).coerceAtLeast(0L)
-        prefs.edit()
-            .putLong("total_rx", prefs.getLong("total_rx", 0) + sessionRx)
-            .putLong("total_tx", prefs.getLong("total_tx", 0) + sessionTx)
-            .remove("live_rx")
-            .remove("live_tx")
-            .apply()
+        // Data already saved continuously in watchTraffic — no-op
     }
 
     private fun currentRxBytes(): Long = trafficBytes(TrafficStats.getUidRxBytes(applicationInfo.uid))
@@ -322,17 +312,24 @@ class AetherVpnService : VpnService() {
             val elapsedMs = (now - lastTrafficSampleMs).coerceAtLeast(1L)
             val rx = currentRxBytes()
             val tx = currentTxBytes()
-            val down = ((rx - lastRxBytes).coerceAtLeast(0L) * 1_000 / elapsedMs)
-            val up = ((tx - lastTxBytes).coerceAtLeast(0L) * 1_000 / elapsedMs)
-            sessionRxBytes += (rx - lastRxBytes).coerceAtLeast(0L)
-            sessionTxBytes += (tx - lastTxBytes).coerceAtLeast(0L)
+            val rxDelta = (rx - lastRxBytes).coerceAtLeast(0L)
+            val txDelta = (tx - lastTxBytes).coerceAtLeast(0L)
+            val down = rxDelta * 1_000 / elapsedMs
+            val up = txDelta * 1_000 / elapsedMs
+            sessionRxBytes += rxDelta
+            sessionTxBytes += txDelta
             lastRxBytes = rx
             lastTxBytes = tx
             lastTrafficSampleMs = now
-            // Save live data usage for main screen
-            getSharedPreferences("settings", MODE_PRIVATE).edit()
-                .putLong("live_rx", getSharedPreferences("settings", MODE_PRIVATE).getLong("total_rx", 0) + sessionRxBytes)
-                .putLong("live_tx", getSharedPreferences("settings", MODE_PRIVATE).getLong("total_tx", 0) + sessionTxBytes)
+            // Save live data usage for main screen + cumulative (crash-safe)
+            val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+            val cumRx = prefs.getLong("total_rx", 0) + rxDelta
+            val cumTx = prefs.getLong("total_tx", 0) + txDelta
+            prefs.edit()
+                .putLong("live_rx", cumRx)
+                .putLong("live_tx", cumTx)
+                .putLong("total_rx", cumRx)
+                .putLong("total_tx", cumTx)
                 .apply()
             val timer = formatDuration((SystemClock.elapsedRealtime() - sessionStartMs) / 1000)
             getSystemService(NotificationManager::class.java)
