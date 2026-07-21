@@ -301,19 +301,19 @@ class MainActivity : Activity() {
     private fun fetchPublicIp() {
         Thread {
             val info = runCatching {
-                // Retry up to 3 times with 1s delay for tunnel readiness
                 var lastError: Exception? = null
                 for (attempt in 1..3) {
                     try {
-                        val connection = URL("https://ipapi.co/json/").openConnection() as HttpURLConnection
+                        val connection = URL("https://ipinfo.io/json").openConnection() as HttpURLConnection
                         try {
                             connection.connectTimeout = 5000
                             connection.readTimeout = 5000
                             connection.requestMethod = "GET"
+                            connection.setRequestProperty("Accept", "application/json")
                             check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
                             val json = connection.inputStream.bufferedReader().readText()
                             val ip = Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: "—"
-                            val country = Regex("\"country_code\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
+                            val country = Regex("\"country\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
                             val flag = if (country.length == 2) {
                                 country.uppercase().map { cp ->
                                     String(Character.toChars(0x1F1E6 + (cp - 'A')))
