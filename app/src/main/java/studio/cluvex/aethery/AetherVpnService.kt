@@ -158,14 +158,7 @@ class AetherVpnService : VpnService() {
             .putLong("session_start", 0L).apply()
         saveSessionDataUsage()
 
-        // Kill Switch: block traffic if unexpected disconnect
-        if (killSwitchEnabled() && !userInitiatedDisconnect.get()) {
-            activateKillSwitchBlackhole()
-            if (notify) sendStatus(STATUS_DISCONNECTED)
-            return
-        }
-
-        // Auto Reconnect: only when not user-initiated, kill switch off, and toggle on
+        // Auto Reconnect: first priority when enabled and not user-initiated
         if (autoReconnectEnabled() && !userInitiatedDisconnect.get() && reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
             reconnectAttempt++
             reconnectScheduled = true
@@ -173,6 +166,13 @@ class AetherVpnService : VpnService() {
             tun = null
             if (notify) sendStatus(STATUS_DISCONNECTED, "Reconnecting in 3s ($reconnectAttempt/$MAX_RECONNECT_ATTEMPTS)")
             scheduleReconnect()
+            return
+        }
+
+        // Kill Switch: block traffic when reconnect is off or exhausted
+        if (killSwitchEnabled() && !userInitiatedDisconnect.get()) {
+            activateKillSwitchBlackhole()
+            if (notify) sendStatus(STATUS_DISCONNECTED)
             return
         }
         reconnectAttempt = 0
