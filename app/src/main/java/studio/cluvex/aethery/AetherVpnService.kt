@@ -10,7 +10,9 @@ import android.content.pm.ServiceInfo
 import android.net.TrafficStats
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
@@ -32,16 +34,36 @@ class AetherVpnService : VpnService() {
     private var lastRxBytes = 0L
     private var lastTxBytes = 0L
     private var lastTrafficSampleMs = 0L
+    private var sessionRxBytes = 0L
+    private var sessionTxBytes = 0L
+    private var sessionStartMs = 0L
+    private var reconnectScheduled = false
+    private var reconnectAttempt = 0
+    private val reconnectHandler = Handler(Looper.getMainLooper())
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_CONNECT -> intent.getStringExtra(EXTRA_CONFIG)?.let { config ->
-                startTunnel(config, intent.getBooleanExtra(EXTRA_VPN_MODE, true))
+            ACTION_CONNECT -> {
+                reconnectAttempt = 0
+                reconnectScheduled = false
+                sessionStartMs = SystemClock.elapsedRealtime()
+                sessionRxBytes = 0
+                sessionTxBytes = 0
+                // Save config for Quick Settings Tile
+                getSharedPreferences("settings", MODE_PRIVATE).edit()
+                    .putString("saved_config", intent.getStringExtra(EXTRA_CONFIG))
+                    .putBoolean("saved_vpn_mode", intent.getBooleanExtra(EXTRA_VPN_MODE, true))
+                    .apply()
+                startTunnel(intent.getStringExtra(EXTRA_CONFIG) ?: return START_NOT_STICKY,
+                    intent.getBooleanExtra(EXTRA_VPN_MODE, true))
             }
             ACTION_DISCONNECT -> {
                 userInitiatedDisconnect.set(true)
+                reconnectHandler.removeCallbacksAndMessages(null)
+                reconnectAttempt = 0
+                reconnectScheduled = false
                 stopTunnel()
             }
         }
@@ -50,6 +72,7 @@ class AetherVpnService : VpnService() {
 
     override fun onDestroy() {
         userInitiatedDisconnect.set(true)
+        reconnectHandler.removeCallbacksAndMessages(null)
         stopTunnel(notify = false)
         worker.shutdownNow()
         readinessWorker.shutdownNow()
@@ -61,6 +84,7 @@ class AetherVpnService : VpnService() {
     private fun startTunnel(config: String, vpnMode: Boolean) {
         if (!connected.compareAndSet(false, true)) return
         stopRequested.set(false)
+        reconnectScheduled = false
         startAsForeground()
         if (vpnMode) watchTraffic()
         sendStatus(STATUS_STARTING)
@@ -78,9 +102,10 @@ class AetherVpnService : VpnService() {
                         .addAddress(addresses.ipv6, 128)
                         .addRoute("0.0.0.0", 0)
                         .addRoute("::", 0)
-                        .addDnsServer("1.1.1.1")
+                        .addDnsServer(dnsServer())
                         .applySplitTunneling()
                         .apply { if (!killSwitchEnabled()) allowBypass() }
+                        .applyBypassIran()
                         .establish() ?: error("Android could not establish the VPN interface")
                     NativeCore.attach(this)
                     ConnectionLog.record("Scanning gateways for VPN")
@@ -110,9 +135,13 @@ class AetherVpnService : VpnService() {
                 NativeCore.detach()
                 tun?.close()
                 tun = null
-                connected.set(false)
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                if (!reconnectScheduled) {
+                    connected.set(false)
+                    getSharedPreferences("settings", MODE_PRIVATE).edit()
+                        .putBoolean("vpn_connected", false).apply()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
             }
         }
     }
@@ -124,18 +153,50 @@ class AetherVpnService : VpnService() {
         trafficCheck?.cancel(true)
         trafficCheck = null
         NativeCore.stop()
+        saveSessionDataUsage()
 
-        // Kill Switch: if active and the drop was NOT user-initiated, keep a
-        // blocking (blackhole) tunnel up so no traffic can leak to the real network.
+        // Kill Switch: block traffic if unexpected disconnect
         if (killSwitchEnabled() && !userInitiatedDisconnect.get()) {
             activateKillSwitchBlackhole()
             if (notify) sendStatus(STATUS_DISCONNECTED)
             return
         }
 
+        // Auto Reconnect: only when not user-initiated, kill switch off, and toggle on
+        if (autoReconnectEnabled() && !userInitiatedDisconnect.get() && reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttempt++
+            reconnectScheduled = true
+            tun?.close()
+            tun = null
+            if (notify) sendStatus(STATUS_DISCONNECTED, "Reconnecting in 3s ($reconnectAttempt/$MAX_RECONNECT_ATTEMPTS)")
+            scheduleReconnect()
+            return
+        }
+        reconnectAttempt = 0
+        reconnectScheduled = false
+
         tun?.close()
         tun = null
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putBoolean("vpn_connected", false).apply()
         if (notify) sendStatus(STATUS_DISCONNECTED)
+    }
+
+    private fun scheduleReconnect() {
+        reconnectHandler.postDelayed({
+            if (!stopRequested.get()) {
+                val savedConfig = getSharedPreferences("settings", MODE_PRIVATE)
+                    .getString("saved_config", null)
+                if (savedConfig != null) {
+                    connected.set(false)
+                    userInitiatedDisconnect.set(false)
+                    // Re-start the tunnel from the same process (don't use ACTION_CONNECT intent)
+                    sessionStartMs = SystemClock.elapsedRealtime()
+                    startTunnel(savedConfig, getSharedPreferences("settings", MODE_PRIVATE)
+                        .getBoolean("saved_vpn_mode", true))
+                }
+            }
+        }, RECONNECT_DELAY_MS)
     }
 
     private fun activateKillSwitchBlackhole() {
@@ -144,10 +205,10 @@ class AetherVpnService : VpnService() {
             tun = Builder()
                 .setSession("MSN-VPN (Kill Switch)")
                 .setMtu(1280)
-                .addAddress("192.0.2.1", 32)   // TEST-NET-1, non-routable
+                .addAddress("192.0.2.1", 32)
                 .addRoute("0.0.0.0", 0)
                 .addRoute("::", 0)
-                .addDnsServer("192.0.2.1")     // sink DNS to nowhere
+                .addDnsServer("192.0.2.1")
                 .allowBypass()
                 .establish()
             ConnectionLog.record("Kill Switch: unexpected disconnect, blocking all traffic")
@@ -162,13 +223,60 @@ class AetherVpnService : VpnService() {
     private fun killSwitchEnabled(): Boolean =
         getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
 
+    private fun autoReconnectEnabled(): Boolean =
+        getSharedPreferences("settings", MODE_PRIVATE).getBoolean("auto_reconnect", true)
+
+    private fun adBlockerEnabled(): Boolean =
+        getSharedPreferences("settings", MODE_PRIVATE).getBoolean("ad_blocker", false)
+
+    private fun bypassIranEnabled(): Boolean =
+        getSharedPreferences("settings", MODE_PRIVATE).getBoolean("bypass_iran", false)
+
+    private fun dnsServer(): String =
+        if (adBlockerEnabled()) "94.140.14.14" else "1.1.1.1"
+
+    private fun Builder.applyBypassIran(): Builder {
+        if (!bypassIranEnabled()) return this
+        IRANIAN_PACKAGES.forEach { pkg ->
+            try { addDisallowedApplication(pkg) } catch (_: Exception) { }
+        }
+        ConnectionLog.record("Bypass Iran: ${IRANIAN_PACKAGES.size} app(s) bypass VPN")
+        return this
+    }
+
+    private fun saveSessionDataUsage() {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val rx = currentRxBytes()
+        val tx = currentTxBytes()
+        val sessionRx = (rx - lastRxBytes).coerceAtLeast(0L)
+        val sessionTx = (tx - lastTxBytes).coerceAtLeast(0L)
+        prefs.edit()
+            .putLong("total_rx", prefs.getLong("total_rx", 0) + sessionRx)
+            .putLong("total_tx", prefs.getLong("total_tx", 0) + sessionTx)
+            .apply()
+    }
+
+    private fun currentRxBytes(): Long = trafficBytes(TrafficStats.getUidRxBytes(applicationInfo.uid))
+    private fun currentTxBytes(): Long = trafficBytes(TrafficStats.getUidTxBytes(applicationInfo.uid))
+
     private fun sendStatus(status: String, detail: String? = null) {
         Log.i(LOG_TAG, "status=$status${detail?.let { " detail=$it" } ?: ""}")
         ConnectionLog.record("${status.replaceFirstChar(Char::uppercase)}${detail?.let { ": $it" } ?: ""}")
+
+        // Update vpn_connected flag for Quick Settings Tile
+        if (status == STATUS_CONNECTED) {
+            getSharedPreferences("settings", MODE_PRIVATE).edit()
+                .putBoolean("vpn_connected", true).apply()
+        } else if (status == STATUS_DISCONNECTED || status == STATUS_FAILED) {
+            getSharedPreferences("settings", MODE_PRIVATE).edit()
+                .putBoolean("vpn_connected", false).apply()
+        }
+
         sendBroadcast(Intent(ACTION_STATUS)
             .setPackage(packageName)
             .putExtra(EXTRA_STATUS, status)
-            .apply { detail?.let { putExtra(EXTRA_DETAIL, it) } })
+            .apply { detail?.let { putExtra(EXTRA_DETAIL, it) } }
+            .apply { putExtra(EXTRA_ELAPSED, (SystemClock.elapsedRealtime() - sessionStartMs) / 1000) })
     }
 
     private fun watchReadiness() {
@@ -198,22 +306,25 @@ class AetherVpnService : VpnService() {
     }
 
     private fun watchTraffic() {
-        lastRxBytes = trafficBytes(TrafficStats.getUidRxBytes(applicationInfo.uid))
-        lastTxBytes = trafficBytes(TrafficStats.getUidTxBytes(applicationInfo.uid))
+        lastRxBytes = currentRxBytes()
+        lastTxBytes = currentTxBytes()
         lastTrafficSampleMs = SystemClock.elapsedRealtime()
         trafficCheck?.cancel(true)
         trafficCheck = readinessWorker.scheduleAtFixedRate({
             val now = SystemClock.elapsedRealtime()
             val elapsedMs = (now - lastTrafficSampleMs).coerceAtLeast(1L)
-            val rx = trafficBytes(TrafficStats.getUidRxBytes(applicationInfo.uid))
-            val tx = trafficBytes(TrafficStats.getUidTxBytes(applicationInfo.uid))
+            val rx = currentRxBytes()
+            val tx = currentTxBytes()
             val down = ((rx - lastRxBytes).coerceAtLeast(0L) * 1_000 / elapsedMs)
             val up = ((tx - lastTxBytes).coerceAtLeast(0L) * 1_000 / elapsedMs)
+            sessionRxBytes += (rx - lastRxBytes).coerceAtLeast(0L)
+            sessionTxBytes += (tx - lastTxBytes).coerceAtLeast(0L)
             lastRxBytes = rx
             lastTxBytes = tx
             lastTrafficSampleMs = now
+            val timer = formatDuration((SystemClock.elapsedRealtime() - sessionStartMs) / 1000)
             getSystemService(NotificationManager::class.java)
-                .notify(NOTIFICATION_ID, notification("↓ ${formatRate(down)}  ↑ ${formatRate(up)}"))
+                .notify(NOTIFICATION_ID, notification("↓ ${formatRate(down)}  ↑ ${formatRate(up)}  $timer"))
         }, 1, 1, TimeUnit.SECONDS)
     }
 
@@ -240,6 +351,21 @@ class AetherVpnService : VpnService() {
         bytesPerSecond < 1_024 -> "$bytesPerSecond B/s"
         bytesPerSecond < 1_048_576 -> "${bytesPerSecond / 1_024} KB/s"
         else -> "${bytesPerSecond / 1_048_576} MB/s"
+    }
+
+    private fun formatDuration(seconds: Long): String {
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, s)
+        else "%02d:%02d".format(m, s)
+    }
+
+    private fun formatData(bytes: Long): String = when {
+        bytes < 1_024 -> "$bytes B"
+        bytes < 1_048_576 -> "${bytes / 1_024} KB"
+        bytes < 1_073_741_824 -> "${bytes / 1_048_576} MB"
+        else -> "%.1f GB".format(bytes.toDouble() / 1_073_741_824.0)
     }
 
     private fun Builder.applySplitTunneling(): Builder {
@@ -275,6 +401,7 @@ class AetherVpnService : VpnService() {
         const val EXTRA_VPN_MODE = "vpn_mode"
         const val EXTRA_STATUS = "status"
         const val EXTRA_DETAIL = "detail"
+        const val EXTRA_ELAPSED = "elapsed"
         const val STATUS_CONNECTING = "connecting"
         const val STATUS_STARTING = "starting"
         const val STATUS_SCANNING = "scanning"
@@ -284,6 +411,19 @@ class AetherVpnService : VpnService() {
         private const val CHANNEL_ID = "aethery_vpn"
         private const val NOTIFICATION_ID = 1
         private const val LOG_TAG = "MSN-VPNVpn"
+        private const val MAX_RECONNECT_ATTEMPTS = 3
+        private const val RECONNECT_DELAY_MS = 3000L
+
+        private val IRANIAN_PACKAGES = listOf(
+            "ir.divar",
+            "ir.co.bazaar",
+            "com.digikala",
+            "com.snapp",
+            "com.tapsi.ryde",
+            "com.mydigipay.payment",
+            "net.irankish.sb24",
+            "com.sheypoor",
+        )
     }
 }
 

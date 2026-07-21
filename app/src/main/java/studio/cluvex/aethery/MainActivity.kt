@@ -22,6 +22,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -53,6 +54,7 @@ class MainActivity : Activity() {
     private lateinit var connectionDetail: TextView
     private lateinit var connectionLatency: TextView
     private lateinit var connectionIp: TextView
+    private lateinit var connectionTimer: TextView
     private lateinit var modeSelector: LinearLayout
     private lateinit var modeValue: TextView
     private lateinit var connectionTypeSelector: LinearLayout
@@ -82,6 +84,9 @@ class MainActivity : Activity() {
     private var splitTunnelAppsPage: View? = null
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
     private var latencyRequest = 0
+    private val timerHandler = Handler(Looper.getMainLooper())
+    private lateinit var timerRunnable: Runnable
+    private var sessionStartTime = 0L
     private val CANVAS by lazy { dynamicColor(android.R.color.system_neutral1_900, FALLBACK_CANVAS) }
     private val SURFACE by lazy { dynamicColor(android.R.color.system_neutral1_800, FALLBACK_SURFACE) }
     private val SURFACE_VARIANT by lazy { dynamicColor(android.R.color.system_neutral2_800, FALLBACK_SURFACE_VARIANT) }
@@ -102,7 +107,10 @@ class MainActivity : Activity() {
                 AetherVpnService.STATUS_SCANNING -> showScanning()
                 AetherVpnService.STATUS_CONNECTED -> showConnected()
                 AetherVpnService.STATUS_FAILED -> showFailure(intent.getStringExtra(AetherVpnService.EXTRA_DETAIL))
-                AetherVpnService.STATUS_DISCONNECTED -> showDisconnected()
+                AetherVpnService.STATUS_DISCONNECTED -> {
+                    showDisconnected()
+                }
+                "KILL_SWITCH_BLOCKED" -> connectionTimer.text = "Kill Switch: blocking traffic"
             }
         }
     }
@@ -130,6 +138,9 @@ class MainActivity : Activity() {
             setOnClickListener { pingConnection() }
         }
         connectionIp = label("IP: —", 13f, MUTED).apply {
+            gravity = Gravity.CENTER
+        }
+        connectionTimer = label("", 13f, MUTED).apply {
             gravity = Gravity.CENTER
         }
         selectedProtocol = defaultProtocol()
@@ -357,6 +368,10 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(4) })
+        addView(connectionTimer, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(2) })
         addView(modeSelector, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(64),
@@ -1157,14 +1172,30 @@ class MainActivity : Activity() {
             dp(52),
         ).apply { topMargin = dp(10) })
 
+        // === ADDITIONAL SETTINGS ===
+        content.addView(label("ADDITIONAL SETTINGS", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(28) })
+        content.addView(createCheckRow("Data usage", formatData(totalData(0L), totalData(1L))) {},
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(8) })
+        content.addView(createCheckRow("Auto reconnect", autoReconnectEnabled(),
+            { toggle("auto_reconnect") }) {},
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
+        content.addView(createCheckRow("Ad Blocker (DNS)", adBlockerEnabled(),
+            { toggle("ad_blocker") }) {},
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
+        content.addView(createCheckRow("Bypass Iranian apps", bypassIranEnabled(),
+            { toggle("bypass_iran") }) {},
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
+        content.addView(createCheckRow("Kill Switch", killSwitchEnabled(),
+            { toggle("kill_switch") }) {},
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
+
         content.addView(label("Version ${appVersion()}", 14f, MUTED).apply {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(0, dp(32), 0, 0)
         })
-        content.addView(createKillSwitchRow(), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(56),
-        ).apply { topMargin = dp(12) })
         content.addView(createSettingsButton("Check for updates") {
             appUpdater.checkForUpdate()
         }, LinearLayout.LayoutParams(
@@ -2005,6 +2036,7 @@ class MainActivity : Activity() {
     }
 
     private fun showConnected() {
+        sessionStartTime = SystemClock.elapsedRealtime()
         visualState = ConnectionControl.State.CONNECTED
         connectionControl.state = visualState
         connectionTitle.setTextColor(connected)
@@ -2012,12 +2044,36 @@ class MainActivity : Activity() {
         connectionDetail.text = "${selectedProtocol.label} tunnel is active"
         connectionLatency.text = "Tap to measure latency"
         connectionIp.text = "IP: —"
+        connectionTimer.text = ""
         setModeEnabled(false)
         pingConnection()
         fetchPublicIp()
+        startTimerUpdates()
+    }
+
+    private fun startTimerUpdates() {
+        timerHandler.removeCallbacks(timerRunnable)
+        timerRunnable = object : Runnable {
+            override fun run() {
+                if (visualState != ConnectionControl.State.CONNECTED) return
+                // Read elapsed from broadcast extra or compute from SharedPreferences
+                // We use a simple approach: read from the service's saved start time
+                val elapsed = SystemClock.elapsedRealtime() - sessionStartTime
+                if (elapsed > 0) {
+                    val totalSec = elapsed / 1000
+                    val h = totalSec / 3600
+                    val m = (totalSec % 3600) / 60
+                    val s = totalSec % 60
+                    connectionTimer.text = if (h > 0) "$h:%02d:%02d".format(m, s) else "%02d:%02d".format(m, s)
+                }
+                timerHandler.postDelayed(this, 1000)
+            }
+        }
+        timerHandler.post(timerRunnable)
     }
 
     private fun showFailure(detail: String? = null) {
+        timerHandler.removeCallbacks(timerRunnable)
         latencyRequest++
         connectionLatency.text = "Latency unavailable"
         visualState = ConnectionControl.State.FAILED
@@ -2100,14 +2156,55 @@ class MainActivity : Activity() {
     private fun killSwitchEnabled(): Boolean =
         getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("kill_switch", false)
 
-    private fun createKillSwitchRow(): LinearLayout {
+    private fun appVersion(): String =
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "Unknown"
+
+    private fun killSwitchEnabled(): Boolean =
+        getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("kill_switch", false)
+
+    private fun autoReconnectEnabled(): Boolean =
+        getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("auto_reconnect", true)
+
+    private fun adBlockerEnabled(): Boolean =
+        getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("ad_blocker", false)
+
+    private fun bypassIranEnabled(): Boolean =
+        getSharedPreferences(SETTINGS, MODE_PRIVATE).getBoolean("bypass_iran", false)
+
+    private fun totalData(rxFirst: Long, txFirst: Long): Pair<Long, Long> {
+        val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+        return Pair(prefs.getLong("total_rx", 0), prefs.getLong("total_tx", 0))
+    }
+
+    private fun formatData(rx: Long, tx: Long): String {
+        fun fmt(bytes: Long): String = when {
+            bytes < 1_024 -> "$bytes B"
+            bytes < 1_048_576 -> "${bytes / 1_024} KB"
+            bytes < 1_073_741_824 -> "${bytes / 1_048_576} MB"
+            else -> "%.1f GB".format(bytes / 1_073_741_824.0)
+        }
+        if (rx == 0L && tx == 0L) return "No data yet"
+        return "↓ ${fmt(rx)}  ↑ ${fmt(tx)}"
+    }
+
+    private fun toggle(key: String) {
+        val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+        val current = prefs.getBoolean(key, false)
+        prefs.edit().putBoolean(key, !current).apply()
+        // Resets the "Additional Settings" section — close and reopen to see the new state
+        // We simply refresh the settings page
+        if (showingSettings) openSettingsScreen(animate = false)
+    }
+
+    private fun createCheckRow(
+        text: String,
+        subtext: Any,
+        onToggle: () -> Unit = {},
+    ): LinearLayout {
         val checkbox = CheckBox(this).apply {
-            isChecked = killSwitchEnabled()
-            contentDescription = "Kill Switch"
-            setOnCheckedChangeListener { _, checked ->
-                getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
-                    .putBoolean("kill_switch", checked).apply()
-            }
+            if (subtext is Boolean) isChecked = subtext
+            contentDescription = text
+            setOnCheckedChangeListener { _, _ -> onToggle() }
         }
         return LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
@@ -2115,13 +2212,24 @@ class MainActivity : Activity() {
             background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
             isClickable = true
             isFocusable = true
-            setOnClickListener { checkbox.isChecked = !checkbox.isChecked }
-            addView(label("Kill Switch", 15f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1f,
-            ))
-            addView(checkbox, LinearLayout.LayoutParams(dp(48), dp(48)))
+            if (subtext is Boolean) {
+                setOnClickListener { checkbox.isChecked = !checkbox.isChecked }
+            }
+            val labelView = label(text, 15f, INK, TypefaceStyle.MEDIUM).apply {
+                if (subtext is String) {
+                    setTextColor(MUTED)
+                    textSize = 14f
+                }
+            }
+            addView(labelView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (subtext is String) {
+                addView(label("  $subtext", 12f, MUTED), LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { rightMargin = dp(8) })
+            } else {
+                addView(checkbox, LinearLayout.LayoutParams(dp(48), dp(48)))
+            }
         }
     }
 
