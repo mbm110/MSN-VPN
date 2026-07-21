@@ -55,6 +55,7 @@ class MainActivity : Activity() {
     private lateinit var connectionLatency: TextView
     private lateinit var connectionIp: TextView
     private lateinit var connectionTimer: TextView
+    private lateinit var connectionUsage: TextView
     private lateinit var modeSelector: LinearLayout
     private lateinit var modeValue: TextView
     private lateinit var connectionTypeSelector: LinearLayout
@@ -141,6 +142,9 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
         connectionTimer = label("", 13f, MUTED).apply {
+            gravity = Gravity.CENTER
+        }
+        connectionUsage = label("", 12f, MUTED).apply {
             gravity = Gravity.CENTER
         }
         selectedProtocol = defaultProtocol()
@@ -369,6 +373,10 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(4) })
         addView(connectionTimer, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(2) })
+        addView(connectionUsage, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(2) })
@@ -1177,8 +1185,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(28) })
-        content.addView(createCheckRow("Data usage", dataUsageSummary()),
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(8) })
+
         content.addView(createCheckRow("Auto reconnect", autoReconnectEnabled(),
             { toggle("auto_reconnect") }),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
@@ -2045,14 +2052,36 @@ class MainActivity : Activity() {
         connectionLatency.text = "Tap to measure latency"
         connectionIp.text = "IP: —"
         connectionTimer.text = ""
+        refreshUsageDisplay()
         setModeEnabled(false)
         pingConnection()
         fetchPublicIp()
         startTimerUpdates()
     }
 
+
+    private fun refreshUsageDisplay() {
+        val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+        val rx = prefs.getLong("total_rx", 0)
+        val tx = prefs.getLong("total_tx", 0)
+        fun fmt(bytes: Long): String = when {
+            bytes < 1_024 -> "$bytes B"
+            bytes < 1_048_576 -> "${bytes / 1_024} KB"
+            bytes < 1_073_741_824 -> "${bytes / 1_048_576} MB"
+            else -> "%.1f GB".format(bytes / 1_073_741_824.0)
+        }
+        val display = StringBuilder("📊 ")
+        val hasRx = rx > 0L
+        val hasTx = tx > 0L
+        display.append(if (hasRx && hasTx) "↓ ${fmt(rx)}  ↑ ${fmt(tx)}" 
+                       else if (hasRx) "↓ ${fmt(rx)}" 
+                       else if (hasTx) "↑ ${fmt(tx)}" 
+                       else "No data yet")
+        connectionUsage.text = display.toString()
+    }
+
     private fun startTimerUpdates() {
-        timerHandler.removeCallbacks(timerRunnable)
+timerHandler.removeCallbacks(timerRunnable)
         timerRunnable = object : Runnable {
             override fun run() {
                 if (visualState != ConnectionControl.State.CONNECTED) return
