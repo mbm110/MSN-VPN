@@ -300,39 +300,29 @@ class MainActivity : Activity() {
 
     private fun fetchPublicIp() {
         Thread {
-            val info = runCatching {
-                var lastError: Exception? = null
-                for (attempt in 1..3) {
-                    try {
-                        val connection = URL("https://ipinfo.io/json").openConnection() as HttpURLConnection
-                        try {
-                            connection.connectTimeout = 5000
-                            connection.readTimeout = 5000
-                            connection.requestMethod = "GET"
-                            connection.setRequestProperty("Accept", "application/json")
-                            check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
-                            val json = connection.inputStream.bufferedReader().readText()
-                            val ip = Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: "—"
-                            val country = Regex("\"country\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
-                            val flag = if (country.length == 2) {
-                                country.uppercase().map { cp ->
-                                    String(Character.toChars(0x1F1E6 + (cp - 'A')))
-                                }.joinToString("")
-                            } else ""
-                            return@runCatching if (flag.isNotEmpty()) "$flag $ip" else ip
-                        } finally {
-                            connection.disconnect()
-                        }
-                    } catch (e: Exception) {
-                        lastError = e
-                        if (attempt < 3) Thread.sleep(1000)
-                    }
+            // Step 1: get IPv4 (HTTPS, always IPv4)
+            val ip = httpGet("https://api.ipify.org?format=json")?.let { json ->
+                Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
+            }
+            // Step 2: get country code from ip-api.com (HTTP with cleartext)
+            val country = if (ip != null) {
+                httpGet("http://ip-api.com/json/$ip?fields=countryCode")?.let { json ->
+                    Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
                 }
-                throw lastError ?: Exception("all retries failed")
-            }.getOrElse { "IP: unavailable" }
+            } else null
+            val flag = if (country != null && country.length == 2) {
+                country.uppercase().map { cp ->
+                    String(Character.toChars(0x1F1E6 + (cp - 'A')))
+                }.joinToString("")
+            } else ""
+            val result = when {
+                ip != null && flag.isNotEmpty() -> "$flag $ip"
+                ip != null -> ip
+                else -> "IP: unavailable"
+            }
             runOnUiThread {
                 if (visualState == ConnectionControl.State.CONNECTED) {
-                    connectionIp.text = "IP: $info"
+                    connectionIp.text = "IP: $result"
                 }
             }
         }.start()

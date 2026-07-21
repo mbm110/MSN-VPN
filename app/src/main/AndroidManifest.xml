@@ -15,6 +15,7 @@
 
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
         android:label="MSN-VPN"
         android:roundIcon="@mipmap/ic_launcher"
