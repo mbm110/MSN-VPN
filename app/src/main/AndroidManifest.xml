@@ -52,7 +52,7 @@
         <service
             android:name=".VpnTileService"
             android:exported="true"
-            android:icon="@drawable/ic_notification"
+            android:icon="@drawable/ic_vpn_status_shield"
             android:label="MSN-VPN"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>

@@ -1,5 +1,6 @@
 package studio.cluvex.aethery
 
+import android.graphics.drawable.Icon
 import android.content.Intent
 import android.net.VpnService
 import android.service.quicksettings.Tile
@@ -54,6 +55,7 @@ class VpnTileService : TileService() {
             .getBoolean("vpn_connected", false)
         qsTile?.let { tile ->
             tile.state = if (connected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+            tile.icon = Icon.createWithResource(this, R.drawable.ic_vpn_status_shield)
             tile.label = if (connected) "Disconnect" else "Connect"
             tile.updateTile()
         }

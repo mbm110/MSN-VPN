@@ -300,29 +300,29 @@ class MainActivity : Activity() {
 
     private fun fetchPublicIp() {
         Thread {
-            // Step 1: get IPv4 (HTTPS, always IPv4)
-            val ip = httpGet("https://api.ipify.org?format=json")?.let { json ->
-                Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
-            }
-            // Step 2: get country code for that IP (HTTPS)
-            val flag = if (ip != null) {
-                httpGet("https://ipinfo.io/$ip/country")?.let { raw ->
-                    val country = raw.trim().take(2)
-                    if (country.length == 2) {
+            val info = runCatching {
+                val connection = URL("https://ipapi.co/json/").openConnection() as HttpURLConnection
+                try {
+                    connection.connectTimeout = 5000
+                    connection.readTimeout = 5000
+                    connection.requestMethod = "GET"
+                    check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
+                    val json = connection.inputStream.bufferedReader().readText()
+                    val ip = Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: "—"
+                    val country = Regex("\"country_code\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
+                    val flag = if (country.length == 2) {
                         country.uppercase().map { cp ->
                             String(Character.toChars(0x1F1E6 + (cp - 'A')))
                         }.joinToString("")
                     } else ""
-                } ?: ""
-            } else ""
-            val result = when {
-                ip != null && flag.isNotEmpty() -> "$flag $ip"
-                ip != null -> ip
-                else -> "unavailable"
-            }
+                    if (flag.isNotEmpty()) "$flag $ip" else ip
+                } finally {
+                    connection.disconnect()
+                }
+            }.getOrElse { "IP: unavailable" }
             runOnUiThread {
                 if (visualState == ConnectionControl.State.CONNECTED) {
-                    connectionIp.text = "IP: $result"
+                    connectionIp.text = "IP: $info"
                 }
             }
         }.start()
@@ -2267,9 +2267,6 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         val current = prefs.getBoolean(key, false)
         prefs.edit().putBoolean(key, !current).apply()
-        // Resets the "Additional Settings" section — close and reopen to see the new state
-        // We simply refresh the settings page
-        if (showingSettings) openSettingsScreen(animate = false)
     }
 
     private fun createCheckRow(
