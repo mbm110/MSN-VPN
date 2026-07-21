@@ -306,7 +306,7 @@ class MainActivity : Activity() {
             }
             // Step 2: get country code for that IP (HTTPS)
             val flag = if (ip != null) {
-                httpGet("https://ipapi.co/$ip/country_code/")?.let { raw ->
+                httpGet("https://ipinfo.io/$ip/country")?.let { raw ->
                     val country = raw.trim().take(2)
                     if (country.length == 2) {
                         country.uppercase().map { cp ->
@@ -388,11 +388,11 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(4) })
-        addView(connectionTimer, LinearLayout.LayoutParams(
+        addView(connectionUsage, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(2) })
-        addView(connectionUsage, LinearLayout.LayoutParams(
+        addView(connectionTimer, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(2) })
@@ -1195,6 +1195,10 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(52),
         ).apply { topMargin = dp(10) })
+        content.addView(createSettingsButton("Additional settings ›") { openAdditionalSettingsScreen() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(52),
+        ).apply { topMargin = dp(8) })
 
         content.addView(label("Version ${appVersion()}", 14f, MUTED).apply {
             gravity = Gravity.CENTER_HORIZONTAL
@@ -1285,10 +1289,7 @@ class MainActivity : Activity() {
             preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
             updateTunnelControlButton(verificationButton, "WireGuard verification · ${if (wireGuardDataCheck()) "Strict" else "Fast"} ›")
         }
-        content.addView(label("ADDITIONAL", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
-        addControl("Additional settings ›") { openAdditionalSettingsScreen() }
+
         scroll.addView(content)
         page.addView(scroll)
         page.setOnApplyWindowInsetsListener { _, insets ->
@@ -2140,7 +2141,7 @@ class MainActivity : Activity() {
             bytes < 1_073_741_824 -> "${bytes / 1_048_576} MB"
             else -> "%.1f GB".format(bytes / 1_073_741_824.0)
         }
-        val display = StringBuilder("📊 ")
+        val display = StringBuilder("Data Usage: ")
         val hasRx = rx > 0L
         val hasTx = tx > 0L
         display.append(if (hasRx && hasTx) "↓ ${fmt(rx)}  ↑ ${fmt(tx)}" 
