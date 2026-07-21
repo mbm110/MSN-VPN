@@ -77,6 +77,7 @@ class MainActivity : Activity() {
     private var showingDefaultProtocol = false
     private var settingsPage: View? = null
     private var tunnelControlsPage: View? = null
+    private var additionalSettingsPage: View? = null
     private var logsPage: View? = null
     private var scannerPage: View? = null
     private var modePage: View? = null
@@ -305,8 +306,8 @@ class MainActivity : Activity() {
             }
             // Step 2: get country code for that IP (HTTPS)
             val flag = if (ip != null) {
-                httpGet("https://api.country.is/$ip")?.let { json ->
-                    val country = Regex("\"country\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
+                httpGet("http://ip-api.com/json/$ip?fields=countryCode")?.let { json ->
+                    val country = Regex("\"countryCode\"\\s*:\\s*\"([^\\\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
                     if (country.length == 2) {
                         country.uppercase().map { cp ->
                             String(Character.toChars(0x1F1E6 + (cp - 'A')))
@@ -1195,25 +1196,6 @@ class MainActivity : Activity() {
             dp(52),
         ).apply { topMargin = dp(10) })
 
-        // === ADDITIONAL SETTINGS ===
-        content.addView(label("ADDITIONAL SETTINGS", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
-
-        content.addView(createCheckRow("Auto reconnect", autoReconnectEnabled(),
-            { toggle("auto_reconnect") }),
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
-        content.addView(createCheckRow("Ad Blocker (DNS)", adBlockerEnabled(),
-            { toggle("ad_blocker") }),
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
-        content.addView(createCheckRow("Bypass Iranian apps", bypassIranEnabled(),
-            { toggle("bypass_iran") }),
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
-        content.addView(createCheckRow("Kill Switch", killSwitchEnabled(),
-            { toggle("kill_switch") }),
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
-
         content.addView(label("Version ${appVersion()}", 14f, MUTED).apply {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(0, dp(32), 0, 0)
@@ -1303,6 +1285,10 @@ class MainActivity : Activity() {
             preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
             updateTunnelControlButton(verificationButton, "WireGuard verification · ${if (wireGuardDataCheck()) "Strict" else "Fast"} ›")
         }
+        content.addView(label("ADDITIONAL", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(28) })
+        addControl("Additional settings ›") { openAdditionalSettingsScreen() }
         scroll.addView(content)
         page.addView(scroll)
         page.setOnApplyWindowInsetsListener { _, insets ->
@@ -1336,6 +1322,74 @@ class MainActivity : Activity() {
     private fun closeTunnelControlsScreen(animate: Boolean = true) {
         val page = tunnelControlsPage ?: return
         tunnelControlsPage = null
+        if (!animate) {
+            pageHost.removeView(page)
+            return
+        }
+        page.animate().alpha(0f).translationX(dp(20).toFloat())
+            .setDuration(LOG_CLOSE_ANIMATION_MS)
+            .setInterpolator(DecelerateInterpolator())
+            .withEndAction { if (page.parent == pageHost) pageHost.removeView(page) }
+            .start()
+    }
+
+    private fun openAdditionalSettingsScreen() {
+        additionalSettingsPage?.let(pageHost::removeView)
+        val page = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+        }
+        content.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(label("\u2190", 32f, INK).apply {
+                contentDescription = "Back to tunnel controls"
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { closeAdditionalSettingsScreen() }
+            }, LinearLayout.LayoutParams(dp(48), dp(56)))
+            addView(label("Additional settings", 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        content.addView(label("Quick settings toggles", 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(28) })
+        
+        content.addView(createCheckRow("Auto reconnect", autoReconnectEnabled(),
+            { toggle("auto_reconnect") }),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(8) })
+        content.addView(createCheckRow("Ad Blocker (DNS)", adBlockerEnabled(),
+            { toggle("ad_blocker") }),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
+        content.addView(createCheckRow("Bypass Iranian apps", bypassIranEnabled(),
+            { toggle("bypass_iran") }),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
+        content.addView(createCheckRow("Kill Switch", killSwitchEnabled(),
+            { toggle("kill_switch") }),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(4) })
+        
+        scroll.addView(content)
+        page.addView(scroll)
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
+            insets
+        }
+        additionalSettingsPage = page
+        pageHost.addView(page)
+        page.requestApplyInsets()
+        content.alpha = 0f
+        content.translationY = dp(12).toFloat()
+        page.alpha = 0f
+        page.translationX = dp(20).toFloat()
+        page.animate().alpha(1f).translationX(0f).setDuration(PAGE_ANIMATION_MS)
+            .setInterpolator(DecelerateInterpolator()).start()
+        content.animate().alpha(1f).translationY(0f).setStartDelay(70)
+            .setDuration(PAGE_ANIMATION_MS).setInterpolator(DecelerateInterpolator()).start()
+    }
+
+    private fun closeAdditionalSettingsScreen(animate: Boolean = true) {
+        val page = additionalSettingsPage ?: return
+        additionalSettingsPage = null
         if (!animate) {
             pageHost.removeView(page)
             return
@@ -1853,6 +1907,7 @@ class MainActivity : Activity() {
         when {
             splitTunnelAppsPage != null -> closeSplitTunnelAppsScreen()
             splitTunnelPage != null -> closeSplitTunnelScreen()
+            additionalSettingsPage != null -> closeAdditionalSettingsScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
             showingLogs -> closeLogsScreen()
             showingSettings -> closeSettingsScreen()
@@ -2077,8 +2132,8 @@ class MainActivity : Activity() {
 
     private fun refreshUsageDisplay() {
         val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        val rx = prefs.getLong("total_rx", 0)
-        val tx = prefs.getLong("total_tx", 0)
+        val rx = prefs.getLong("live_rx", prefs.getLong("total_rx", 0))
+        val tx = prefs.getLong("live_tx", prefs.getLong("total_tx", 0))
         fun fmt(bytes: Long): String = when {
             bytes < 1_024 -> "$bytes B"
             bytes < 1_048_576 -> "${bytes / 1_024} KB"
