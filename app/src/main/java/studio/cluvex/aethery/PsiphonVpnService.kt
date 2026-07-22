@@ -9,13 +9,26 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import ca.psiphon.PsiphonTunnel
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * Foreground VpnService hosting Psiphon tunnel.
+ * Architecture follows MahsaNG's proven approach:
+ *   1. Start foreground notification immediately
+ *   2. Establish VPN TUN interface on background thread
+ *   3. Start Psiphon tunnel in VPN mode
+ *   4. bindToDevice() calls protect() to prevent routing loops
+ */
 class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     private var tunnel: PsiphonTunnel? = null
     private val isConnected = AtomicBoolean(false)
     private var hasFgService = false
+
+    // ── Lifecycle ──────────────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
@@ -26,36 +39,17 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> {
-                Log.i(TAG, "ACTION_CONNECT received")
-                // Start foreground FIRST (before any heavy work)
-                try {
-                    startFg("Starting Psiphon…")
-                    hasFgService = true
-                    Log.i(TAG, "Foreground started")
-                } catch (e: Throwable) {
-                    Log.e(TAG, "Failed to start foreground", e)
-                }
-                // Now initialize tunnel – catch EVERYTHING
-                try {
-                    Log.i(TAG, "Creating PsiphonTunnel…")
-                    tunnel = PsiphonTunnel.newPsiphonTunnel(this)
-                    Log.i(TAG, "Tunnel instance created")
-                    tunnel?.setVpnMode(true)
-                    Log.i(TAG, "VPN mode set, starting tunneling…")
-                    tunnel?.startTunneling("")
-                    // NOTE: startTunneling returns immediately if Go starts OK
-                    // If it throws we'll catch it below
-                    Log.i(TAG, "startTunneling returned successfully")
-                    sendStatus(AetherVpnService.STATUS_STARTING)
-                } catch (e: Throwable) {
-                    Log.e(TAG, "FAILED to start Psiphon", e)
-                    sendStatus(AetherVpnService.STATUS_DISCONNECTED, e.toString())
-                    try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
-                    stopSelf()
+                // 1. Foreground FIRST (Android 14+ requires instant startForeground)
+                ensureFg("Starting Psiphon…")
+
+                // 2. Start tunnel on background thread to avoid blocking main thread
+                Thread { startTunnel() }.apply {
+                    name = "PsiphonInit"
+                    start()
                 }
             }
             ACTION_DISCONNECT -> {
-                Log.i(TAG, "ACTION_DISCONNECT received")
+                Log.i(TAG, "Disconnect requested")
                 stopTunnel()
             }
         }
@@ -66,47 +60,82 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     override fun onDestroy() {
         Log.i(TAG, "onDestroy")
-        try { tunnel?.stop() } catch (_: Throwable) {}
-        tunnel = null
-        if (hasFgService) {
-            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
-        }
+        stopTunnelInternal()
         super.onDestroy()
     }
 
-    private fun stopTunnel() {
-        try { tunnel?.stop() } catch (_: Throwable) {}
-        tunnel = null
-        isConnected.set(false)
-        prefs().edit().putBoolean("vpn_connected", false).apply()
-        if (hasFgService) {
-            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
-            hasFgService = false
-        }
-        stopSelf()
+    override fun onRevoke() {
+        Log.w(TAG, "VPN permission revoked")
+        stopTunnel()
     }
 
-    // ==================== HostService impl ====================
+    private fun startTunnel() {
+        try {
+            // Establish VPN TUN before Psiphon (prevents socket routing issues)
+            Log.i(TAG, "Establishing VPN TUN interface…")
+            establishVpnInterface()
+
+            Log.i(TAG, "Creating PsiphonTunnel instance…")
+            tunnel = PsiphonTunnel.newPsiphonTunnel(this)
+            tunnel?.setClientPlatformAffixes("", "")
+            tunnel?.setVpnMode(true)
+
+            Log.i(TAG, "Starting tunnel…")
+            tunnel?.startTunneling("") // server entries loaded from assets if available
+            Log.i(TAG, "startTunneling returned — Psiphon is running in background")
+            sendStatus(AetherVpnService.STATUS_CONNECTING)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start Psiphon: ${e.message}", e)
+            sendStatus(AetherVpnService.STATUS_DISCONNECTED, "Psiphon error: ${e.message}")
+            stopTunnelInternal()
+        }
+    }
+
+    // ── VPN TUN interface (before Psiphon) ─────────────────────
+
+    private fun establishVpnInterface() {
+        val builder = Builder()
+        builder.setMtu(1500)
+        builder.addAddress("10.0.0.1", 24)
+        builder.addRoute("0.0.0.0", 0)
+        builder.addDnsServer("8.8.8.8")
+        builder.addDnsServer("1.1.1.1")
+        builder.setSession("MSN-VPN Psiphon")
+
+        val iface = builder.establish()
+            ?: throw Exception("VpnService.Builder.establish() returned null — VPN permission not granted")
+        iface.close() // We keep the VPN established; Psiphon uses its own TUN internally
+        isConnected.set(true)
+        Log.i(TAG, "VPN TUN interface established successfully")
+    }
+
+    // ── PsiphonTunnel.HostService ─────────────────────────────
 
     override fun getContext(): Context = this
 
-    override fun getPsiphonConfig(): String = """{
-  "client_platform": "Android",
-  "sponsor_id": "00000000-0000-0000-0000-000000000000",
-  "propagation_channel_id": "00000000-0000-0000-0000-000000000000",
-  "disable_replay": false,
-  "remote_server_list_urls": ["https://proxy.psi.cash/server_list"],
-  "tunnel_whole_device": true
-}"""
+    override fun getPsiphonConfig(): String = buildConfig()
 
     override fun loadLibrary(name: String) {
         Log.i(TAG, "Loading native library: $name")
         System.loadLibrary(name)
-        Log.i(TAG, "Library loaded: $name")
+        Log.i(TAG, "Native library loaded: $name")
+    }
+
+    /**
+     * CRITICAL: Psiphon's Go runtime calls this for every socket it opens.
+     * Must call VpnService.protect() to exempt Psiphon's connections from
+     * the VPN routing loop. WITHOUT THIS the Go runtime panics immediately.
+     */
+    override fun bindToDevice(fd: Long) {
+        val result = protect(fd.toInt())
+        if (!result) {
+            throw RuntimeException("VpnService.protect() failed for fd=$fd")
+        }
+        Log.v(TAG, "protect(fd=$fd) OK")
     }
 
     override fun onDiagnosticMessage(message: String) {
-        Log.i(TAG, "[Psiphon] $message")
+        Log.d(TAG, "[Psiphon] $message")
     }
 
     override fun onConnecting() {
@@ -118,6 +147,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         Log.i(TAG, "onConnected")
         isConnected.set(true)
         prefs().edit().putBoolean("vpn_connected", true).apply()
+        updateFg("Psiphon Connected")
         sendStatus(AetherVpnService.STATUS_CONNECTED)
     }
 
@@ -126,8 +156,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         isConnected.set(false)
         prefs().edit().putBoolean("vpn_connected", false).apply()
         sendStatus(AetherVpnService.STATUS_DISCONNECTED)
-        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
-        stopSelf()
+        stopTunnelInternal()
     }
 
     override fun onClientRegion(region: String) {}
@@ -143,7 +172,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             .apply()
     }
 
-    // Stubs for remaining HostService methods
+    // Stubs
     override fun onAvailableEgressRegions(regions: MutableList<String>) {}
     override fun onSocksProxyPortInUse(port: Int) {}
     override fun onHttpProxyPortInUse(port: Int) {}
@@ -151,28 +180,73 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     override fun onListeningHttpProxyPort(port: Int) {}
     override fun onListeningSocksProxyUnixPath(path: String) {}
     override fun onListeningHttpProxyUnixPath(path: String) {}
-    override fun onUpstreamProxyError(message: String) {
-        Log.e(TAG, "Upstream proxy error: $message")
-    }
+    override fun onUpstreamProxyError(message: String) { Log.e(TAG, "Upstream proxy: $message") }
     override fun onHomepage(url: String) {}
     override fun onClientIsLatestVersion() {}
     override fun onClientUpgradeDownloaded(filename: String) {}
     override fun onSplitTunnelRegions(regions: MutableList<String>) {}
     override fun onUntunneledAddress(address: String) {}
-    override fun onStartedWaitingForNetworkConnectivity() {
-        Log.w(TAG, "Waiting for network connectivity…")
-    }
-    override fun onStoppedWaitingForNetworkConnectivity() {}
-    override fun onActiveAuthorizationIDs(authorizationIDs: MutableList<String>) {}
-    override fun onTrafficRateLimits(upstreamBytesPerSecond: Long, downstreamBytesPerSecond: Long) {}
+    override fun onStartedWaitingForNetworkConnectivity() { Log.w(TAG, "Waiting for network…") }
+    override fun onStoppedWaitingForNetworkConnectivity() { Log.i(TAG, "Network OK") }
+    override fun onActiveAuthorizationIDs(ids: MutableList<String>) {}
+    override fun onTrafficRateLimits(up: Long, down: Long) {}
     override fun onApplicationParameters(parameters: Any) {}
-    override fun onServerAlert(message: String, reason: String, filteredRegions: MutableList<String>) {}
+    override fun onServerAlert(msg: String, reason: String, regions: MutableList<String>) {}
     override fun onInproxyMustUpgrade() {}
     override fun onInproxyProxyActivity(egressNodeCount: Int, proxyNodeCount: Int, brokerCount: Int, totalTransferredBytes: Long, totalConnectedSeconds: Long, icEgressSnapshot: MutableMap<String, PsiphonTunnel.RegionActivitySnapshot>, icProxySnapshot: MutableMap<String, PsiphonTunnel.RegionActivitySnapshot>) {}
     override fun onLightProxyAvailable() {}
-    override fun bindToDevice(fd: Long) {}
 
-    // ==================== helpers ====================
+    // ── Config builder (matches MahsaNG's proven format) ───────
+
+    private fun buildConfig(): String {
+        // Load base config from assets/psiphon_config.json if exists
+        val config = JSONObject()
+        try {
+            val base = assets.open("psiphon_config.json").bufferedReader().use { it.readText() }
+            val baseJson = JSONObject(base)
+            val keys = baseJson.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                config.put(k, baseJson.get(k))
+            }
+        } catch (_: Exception) {}
+
+        // Core required fields (MahsaNG format)
+        if (!config.has("SponsorId"))
+            config.put("SponsorId", "FFFFFFFFFFFFFFFF")
+        if (!config.has("PropagationChannelId"))
+            config.put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
+        if (!config.has("ClientPlatform"))
+            config.put("ClientPlatform", "Android")
+        if (!config.has("ClientVersion"))
+            config.put("ClientVersion", "1")
+
+        // Data directory
+        val dataDir = File(filesDir, "psiphon_data")
+        dataDir.mkdirs()
+        config.put("DataRootDirectory", dataDir.absolutePath)
+
+        // Diagnostic logging
+        config.put("EmitDiagnosticNotices", true)
+        config.put("EmitDiagnosticNetworkParameters", true)
+        config.put("EmitBytesTransferred", true)
+        config.put("EmitServerAlerts", true)
+
+        // DNS
+        config.put("DNSResolverAlternateServers", JSONArray().apply {
+            put("1.1.1.1")
+            put("1.0.0.1")
+            put("8.8.8.8")
+            put("8.8.4.4")
+        })
+
+        // No timeout
+        config.put("EstablishTunnelTimeoutSeconds", 0)
+
+        return config.toString()
+    }
+
+    // ── Helpers ────────────────────────────────────────────────
 
     private fun prefs() = getSharedPreferences("settings", MODE_PRIVATE)
 
@@ -184,12 +258,27 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         })
     }
 
-    private fun startFg(text: String) {
-        val n = buildNotification(text)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTIFICATION_ID, n)
+    private fun ensureFg(text: String) {
+        try {
+            val n = buildNotification(text)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(NOTIFICATION_ID, n)
+            }
+            hasFgService = true
+        } catch (e: Throwable) {
+            Log.e(TAG, "startForeground failed", e)
+        }
+    }
+
+    private fun updateFg(text: String) {
+        try {
+            val n = buildNotification(text)
+            val mgr = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            mgr.notify(NOTIFICATION_ID, n)
+        } catch (e: Exception) {
+            Log.e(TAG, "updateNotification failed", e)
         }
     }
 
@@ -214,6 +303,22 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             .setOnlyAlertOnce(true)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopIntent)
             .build()
+    }
+
+    private fun stopTunnel() {
+        stopTunnelInternal()
+    }
+
+    private fun stopTunnelInternal() {
+        try { tunnel?.stop() } catch (_: Throwable) {}
+        tunnel = null
+        isConnected.set(false)
+        prefs().edit().putBoolean("vpn_connected", false).apply()
+        if (hasFgService) {
+            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
+            hasFgService = false
+        }
+        try { stopSelf() } catch (_: Throwable) {}
     }
 
     companion object {
