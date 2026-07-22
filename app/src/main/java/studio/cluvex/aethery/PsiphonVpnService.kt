@@ -101,8 +101,17 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             tunnel?.setVpnMode(true)
             tunnel?.setClientPlatformAffixes("", "")
 
+            log("Loading embedded server entries from assets…")
+            val serverEntries = try {
+                assets.open("server_entries.txt").bufferedReader().use { it.readText() }
+            } catch (e: Exception) {
+                log("⚠️ No server_entries.txt in assets: ${e.message}")
+                ""
+            }
+            val entryCount = if (serverEntries.isBlank()) 0 else serverEntries.trim().split(Regex("\s+")).size
+            log("📋 $entryCount embedded server entries loaded")
             log("Calling startTunneling…")
-            tunnel?.startTunneling("")
+            tunnel?.startTunneling(serverEntries)
             log("✅ startTunneling returned — Psiphon running in bg")
             broadcastStatus(AetherVpnService.STATUS_CONNECTING)
         } catch (e: Exception) {
@@ -271,6 +280,15 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         if (!config.has("PropagationChannelId")) config.put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
         if (!config.has("ClientPlatform")) config.put("ClientPlatform", "Android")
         if (!config.has("ClientVersion")) config.put("ClientVersion", "1")
+
+        // Remote server list URLs (fallback if no embedded entries)
+        if (!config.has("RemoteServerListURLs")) {
+            config.put("RemoteServerListURLs", JSONArray().apply {
+                put("https://proxy.psi.cash/server_list")
+                put("https://psiphon3.com/server_list")
+                put("https://psiphon.ca/server_list")
+            })
+        }
 
         // Local SOCKS/HTTP proxy ports (NOT VPN mode)
         config.put("LocalSocksProxyPort", SOCKS_PORT)
