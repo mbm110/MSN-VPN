@@ -19,8 +19,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import studio.cluvex.aethery.ConnectionLog
 
 /**
- * PsiphonVpnService — runs Psiphon as a local SOCKS5 proxy (NOT VPN mode)
- * to avoid TUN interface collision with Aethery's VpnService.
+ * PsiphonVpnService — hosts Psiphon with setVpnMode(true).
+ * Psiphon internally creates/manages the TUN interface via VpnService.Builder.
  *
  * Threading: ALL Psiphon native calls (start, stop, config) run on a
  * dedicated background thread via Executors. Never block the main thread.
@@ -48,6 +48,8 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     private var tunnel: PsiphonTunnel? = null
     private val isRunning = AtomicBoolean(false)
     private var hasFgService = false
+    private var reconnectScheduled = false
+    private var killSwitchEnabled = false
     private val logBuffer = mutableListOf<String>()
 
     // ── Lifecycle ──────────────────────────────────────────────
@@ -98,6 +100,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             // VPN mode — Psiphon internally creates VpnService.Builder
             // and sets up TUN routing. protect() in bindToDevice prevents
             // routing loops.
+            killSwitchEnabled = prefs().getBoolean("kill_switch", false)
             tunnel?.setVpnMode(true)
             tunnel?.setClientPlatformAffixes("", "")
 
@@ -176,11 +179,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         log("Native lib loaded: $name")
     }
 
-    /**
-     * Bind socket to the VPN interface to prevent routing loops.
-     * If we're NOT using VPN mode, this is a no-op (still implemented
-    )
-     */
+    /** Bind socket to the VPN interface to prevent routing loops */
     override fun bindToDevice(fd: Long) {
         val ok = protect(fd.toInt())
         if (!ok) throw RuntimeException("protect($fd) failed")
@@ -231,7 +230,8 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         log("✅ Connected!")
         isRunning.set(true)
         prefs().edit().putBoolean("vpn_connected", true).apply()
-        updateFg("Connected (SOCKS :$SOCKS_PORT)")
+        val ks = if (killSwitchEnabled) " ⛔KS" else ""
+        updateFg("Connected$ks")
         broadcastStatus(AetherVpnService.STATUS_CONNECTED)
     }
 
@@ -241,6 +241,20 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         prefs().edit().putBoolean("vpn_connected", false).apply()
         broadcastStatus(AetherVpnService.STATUS_DISCONNECTED)
         cleanup()
+
+        // Auto-Reconnect: check prefs and try again after 3s
+        val autoReconnect = prefs().getBoolean("auto_reconnect", false)
+        if (autoReconnect && tunnel == null) {
+            log("🔄 Auto-reconnect in 3s…")
+            bg.submit {
+                Thread.sleep(3000)
+                reconnectScheduled = false
+                if (tunnel == null) {
+                    log("🔄 Auto-reconnecting…")
+                    startTunnelBg()
+                }
+            }
+        }
     }
 
     // Proxy port callbacks — tell the UI where we're listening
