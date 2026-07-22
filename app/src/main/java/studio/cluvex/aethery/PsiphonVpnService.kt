@@ -283,9 +283,9 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         // Remote server list URLs (fallback if no embedded entries)
         if (!config.has("RemoteServerListURLs")) {
             config.put("RemoteServerListURLs", JSONArray().apply {
-                put("https://proxy.psi.cash/server_list")
-                put("https://psiphon3.com/server_list")
-                put("https://psiphon.ca/server_list")
+                put(JSONObject().put("URL", "https://proxy.psi.cash/server_list"))
+                put(JSONObject().put("URL", "https://psiphon3.com/server_list"))
+                put(JSONObject().put("URL", "https://psiphon.ca/server_list"))
             })
         }
 
