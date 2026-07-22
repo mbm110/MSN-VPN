@@ -108,8 +108,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 log("⚠️ No server_entries.txt in assets: ${e.message}")
                 ""
             }
-            val entryCount = if (serverEntries.isBlank()) 0 else serverEntries.trim().split(Regex("\s+")).size
-            log("📋 $entryCount embedded server entries loaded")
+            log("📋 Embedded server entries: ${serverEntries.length} bytes loaded")
             log("Calling startTunneling…")
             tunnel?.startTunneling(serverEntries)
             log("✅ startTunneling returned — Psiphon running in bg")
