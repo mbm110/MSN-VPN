@@ -186,6 +186,32 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             logBuffer.add("[Psiphon] $message")
             if (logBuffer.size > 200) logBuffer.removeAt(0)
         }
+
+        // Parse JSON diagnostic notices for state changes
+        try {
+            val notice = org.json.JSONObject(message)
+            val noticeType = notice.optString("noticeType", "")
+            when (noticeType) {
+                "ListeningSocksProxyPort" -> {
+                    val port = notice.optInt("port", 10808)
+                    log("✅ SOCKS proxy listening on :$port — tunnel ready")
+                    broadcastStatus(AetherVpnService.STATUS_CONNECTED)
+                }
+                "Tunnels" -> {
+                    val count = notice.optInt("count", 0)
+                    if (count > 0) {
+                        log("✅ $count tunnel(s) established")
+                        broadcastStatus(AetherVpnService.STATUS_CONNECTED)
+                    }
+                }
+                "ConnectingServer" -> {
+                    log("🔌 Connecting to server…")
+                    broadcastStatus(AetherVpnService.STATUS_CONNECTING)
+                }
+            }
+        } catch (_: org.json.JSONException) {
+            // Not JSON — plain diagnostic text, ignore for state tracking
+        }
     }
 
     override fun onConnecting() {
