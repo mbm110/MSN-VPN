@@ -1,52 +1,61 @@
 package studio.cluvex.aethery
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
+import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import ca.psiphon.PsiphonTunnel
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Foreground Service that hosts PsiphonTunnel.
- * Used when the user selects "Psiphon" as the connection protocol.
- * PsiphonTunnel internally manages VPN (via setVpnMode(true)).
- */
-class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
+class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     private var tunnel: PsiphonTunnel? = null
     private val isConnected = AtomicBoolean(false)
-
-    // ── Lifecycle ──────────────────────────────────────────────
+    private var hasFgService = false
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        Log.i(TAG, "Service created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> {
-                startFg("Starting Psiphon…")
+                Log.i(TAG, "ACTION_CONNECT received")
+                // Start foreground FIRST (before any heavy work)
                 try {
+                    startFg("Starting Psiphon…")
+                    hasFgService = true
+                    Log.i(TAG, "Foreground started")
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Failed to start foreground", e)
+                }
+                // Now initialize tunnel – catch EVERYTHING
+                try {
+                    Log.i(TAG, "Creating PsiphonTunnel…")
                     tunnel = PsiphonTunnel.newPsiphonTunnel(this)
+                    Log.i(TAG, "Tunnel instance created")
                     tunnel?.setVpnMode(true)
-                    tunnel?.startTunneling("")   // config loaded via getPsiphonConfig()
-                    Log.i(TAG, "PsiphonTunnel started")
-                } catch (e: Exception) {
-                    Log.e(TAG, "start failed", e)
-                    broadcastStatus(STATUS_DISCONNECTED, "Psiphon error: ${e.message}")
+                    Log.i(TAG, "VPN mode set, starting tunneling…")
+                    tunnel?.startTunneling("")
+                    // NOTE: startTunneling returns immediately if Go starts OK
+                    // If it throws we'll catch it below
+                    Log.i(TAG, "startTunneling returned successfully")
+                    sendStatus(AetherVpnService.STATUS_STARTING)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "FAILED to start Psiphon", e)
+                    sendStatus(AetherVpnService.STATUS_DISCONNECTED, e.toString())
+                    try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
                     stopSelf()
                 }
             }
             ACTION_DISCONNECT -> {
+                Log.i(TAG, "ACTION_DISCONNECT received")
                 stopTunnel()
             }
         }
@@ -56,22 +65,28 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        tunnel?.stop()
+        Log.i(TAG, "onDestroy")
+        try { tunnel?.stop() } catch (_: Throwable) {}
         tunnel = null
+        if (hasFgService) {
+            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
+        }
         super.onDestroy()
     }
 
     private fun stopTunnel() {
-        tunnel?.stop()
+        try { tunnel?.stop() } catch (_: Throwable) {}
         tunnel = null
         isConnected.set(false)
         prefs().edit().putBoolean("vpn_connected", false).apply()
-        broadcastStatus(STATUS_DISCONNECTED, "Disconnected")
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        if (hasFgService) {
+            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
+            hasFgService = false
+        }
         stopSelf()
     }
 
-    // ── PsiphonTunnel.HostService ─────────────────────────────
+    // ==================== HostService impl ====================
 
     override fun getContext(): Context = this
 
@@ -85,35 +100,39 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
 }"""
 
     override fun loadLibrary(name: String) {
+        Log.i(TAG, "Loading native library: $name")
         System.loadLibrary(name)
+        Log.i(TAG, "Library loaded: $name")
     }
 
     override fun onDiagnosticMessage(message: String) {
-        Log.d(TAG, message)
+        Log.i(TAG, "[Psiphon] $message")
+    }
+
+    override fun onConnecting() {
+        Log.i(TAG, "onConnecting")
+        sendStatus(AetherVpnService.STATUS_CONNECTING)
     }
 
     override fun onConnected() {
+        Log.i(TAG, "onConnected")
         isConnected.set(true)
         prefs().edit().putBoolean("vpn_connected", true).apply()
-        startFg("Connected")
-        broadcastStatus(STATUS_CONNECTED, "Psiphon tunnel established")
+        sendStatus(AetherVpnService.STATUS_CONNECTED)
     }
 
     override fun onExiting() {
+        Log.i(TAG, "onExiting")
         isConnected.set(false)
         prefs().edit().putBoolean("vpn_connected", false).apply()
-        broadcastStatus(STATUS_DISCONNECTED, "Psiphon stopped")
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        sendStatus(AetherVpnService.STATUS_DISCONNECTED)
+        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
         stopSelf()
     }
 
-    override fun onClientRegion(region: String) {
-        broadcastIntent(ACTION_REGION).putExtra("region", region).let(::sendBroadcast)
-    }
-
-    override fun onClientAddress(address: String) {
-        broadcastIntent(ACTION_ADDRESS).putExtra("address", address).let(::sendBroadcast)
-    }
+    override fun onClientRegion(region: String) {}
+    override fun onClientAddress(address: String) {}
+    override fun onConnectedServerRegion(region: String) {}
 
     override fun onBytesTransferred(sent: Long, received: Long) {
         prefs().edit()
@@ -124,7 +143,7 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
             .apply()
     }
 
-    // ── overrides with default impl to avoid crashes ──────────
+    // Stubs for remaining HostService methods
     override fun onAvailableEgressRegions(regions: MutableList<String>) {}
     override fun onSocksProxyPortInUse(port: Int) {}
     override fun onHttpProxyPortInUse(port: Int) {}
@@ -132,14 +151,17 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
     override fun onListeningHttpProxyPort(port: Int) {}
     override fun onListeningSocksProxyUnixPath(path: String) {}
     override fun onListeningHttpProxyUnixPath(path: String) {}
-    override fun onUpstreamProxyError(message: String) {}
-    override fun onConnecting() {}
+    override fun onUpstreamProxyError(message: String) {
+        Log.e(TAG, "Upstream proxy error: $message")
+    }
     override fun onHomepage(url: String) {}
     override fun onClientIsLatestVersion() {}
     override fun onClientUpgradeDownloaded(filename: String) {}
     override fun onSplitTunnelRegions(regions: MutableList<String>) {}
     override fun onUntunneledAddress(address: String) {}
-    override fun onStartedWaitingForNetworkConnectivity() {}
+    override fun onStartedWaitingForNetworkConnectivity() {
+        Log.w(TAG, "Waiting for network connectivity…")
+    }
     override fun onStoppedWaitingForNetworkConnectivity() {}
     override fun onActiveAuthorizationIDs(authorizationIDs: MutableList<String>) {}
     override fun onTrafficRateLimits(upstreamBytesPerSecond: Long, downstreamBytesPerSecond: Long) {}
@@ -147,13 +169,20 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
     override fun onServerAlert(message: String, reason: String, filteredRegions: MutableList<String>) {}
     override fun onInproxyMustUpgrade() {}
     override fun onInproxyProxyActivity(egressNodeCount: Int, proxyNodeCount: Int, brokerCount: Int, totalTransferredBytes: Long, totalConnectedSeconds: Long, icEgressSnapshot: MutableMap<String, PsiphonTunnel.RegionActivitySnapshot>, icProxySnapshot: MutableMap<String, PsiphonTunnel.RegionActivitySnapshot>) {}
-    override fun onConnectedServerRegion(region: String) {}
     override fun onLightProxyAvailable() {}
     override fun bindToDevice(fd: Long) {}
 
-    // ── helpers ───────────────────────────────────────────────
+    // ==================== helpers ====================
 
     private fun prefs() = getSharedPreferences("settings", MODE_PRIVATE)
+
+    private fun sendStatus(status: String, detail: String? = null) {
+        sendBroadcast(Intent(AetherVpnService.ACTION_STATUS).apply {
+            putExtra(AetherVpnService.EXTRA_STATUS, status)
+            if (detail != null) putExtra(AetherVpnService.EXTRA_DETAIL, detail)
+            `package` = packageName
+        })
+    }
 
     private fun startFg(text: String) {
         val n = buildNotification(text)
@@ -187,24 +216,9 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
             .build()
     }
 
-    private fun broadcastIntent(action: String) = Intent(action).setPackage(packageName)
-
-    private fun broadcastStatus(status: String, message: String) {
-        sendBroadcast(Intent(AetherVpnService.ACTION_STATUS).apply {
-            putExtra(AetherVpnService.EXTRA_STATUS, status)
-            putExtra(AetherVpnService.EXTRA_DETAIL, message)
-            `package` = packageName
-        })
-    }
-
     companion object {
         const val ACTION_CONNECT = "studio.cluvex.aethery.psiphon.CONNECT"
         const val ACTION_DISCONNECT = "studio.cluvex.aethery.psiphon.DISCONNECT"
-        const val ACTION_STATUS = "studio.cluvex.aethery.psiphon.STATUS"
-        const val ACTION_REGION = "studio.cluvex.aethery.psiphon.REGION"
-        const val ACTION_ADDRESS = "studio.cluvex.aethery.psiphon.ADDRESS"
-        const val STATUS_CONNECTED = "connected"
-        const val STATUS_DISCONNECTED = "disconnected"
         private const val CHANNEL_ID = "psiphon_vpn"
         private const val NOTIFICATION_ID = 2
         private const val TAG = "PsiphonVpn"
