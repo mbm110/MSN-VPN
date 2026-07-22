@@ -249,9 +249,15 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == VPN_REQUEST && resultCode == RESULT_OK) {
+            if (pendingPsiphonStart) {
+                pendingPsiphonStart = false
+                startPsiphonVpn()
+                return
+            }
             pendingConfig?.let(::connect)
         } else if (requestCode == VPN_REQUEST) {
             showDisconnected("VPN permission required")
+            pendingPsiphonStart = false
         }
         pendingConfig = null
     }
