@@ -280,16 +280,11 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         if (!config.has("ClientPlatform")) config.put("ClientPlatform", "Android")
         if (!config.has("ClientVersion")) config.put("ClientVersion", "1")
 
-        // Remote server list URLs (fallback if no embedded entries)
-        if (!config.has("RemoteServerListURLs")) {
-            config.put("RemoteServerListURLs", JSONArray().apply {
-                put(JSONObject().put("URL", "https://proxy.psi.cash/server_list"))
-                put(JSONObject().put("URL", "https://psiphon3.com/server_list"))
-                put(JSONObject().put("URL", "https://psiphon.ca/server_list"))
-            })
-        }
+        // No RemoteServerListURLs — we already have 430 embedded server entries.
+        // Without RemoteServerListSignaturePublicKey, Go Config.Commit rejects
+        // non-empty RemoteServerListURLs. Embedded entries suffice for bootstrap.
 
-        // Local SOCKS/HTTP proxy ports (NOT VPN mode)
+        // Local SOCKS/HTTP proxy ports (side channels even in VPN mode)
         config.put("LocalSocksProxyPort", SOCKS_PORT)
         config.put("LocalHttpProxyPort", HTTP_PORT)
 
