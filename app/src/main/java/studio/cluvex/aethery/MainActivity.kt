@@ -68,6 +68,7 @@ class MainActivity : Activity() {
     private lateinit var appUpdater: AppUpdater
     private var selectedProtocol = Protocol.MASQUE
     private var pendingConfig: String? = null
+    private var pendingPsiphonStart = false
     private var visualState = ConnectionControl.State.DISCONNECTED
     private var receiverRegistered = false
     private var showingSettings = false
@@ -126,6 +127,8 @@ class MainActivity : Activity() {
                 AetherVpnService.STATUS_FAILED -> showFailure(intent.getStringExtra(AetherVpnService.EXTRA_DETAIL))
                 AetherVpnService.STATUS_DISCONNECTED -> {
                     showDisconnected()
+                    getSharedPreferences("settings", MODE_PRIVATE).edit()
+                        .putBoolean("psiphon_running", false).apply()
                 }
                 "KILL_SWITCH_BLOCKED" -> connectionTimer.text = "Kill Switch: blocking traffic"
             }
@@ -2044,6 +2047,10 @@ class MainActivity : Activity() {
 
 
     private fun toggleTunnel() {
+        if (selectedProtocol == Protocol.PSIPHON) {
+            togglePsiphon()
+            return
+        }
         if (NativeCore.isRunning()) {
             startService(Intent(this, AetherVpnService::class.java).setAction(AetherVpnService.ACTION_DISCONNECT))
             showDisconnected("Disconnecting")
@@ -2059,6 +2066,39 @@ class MainActivity : Activity() {
         if (permissionIntent == null) connect(config) else {
             pendingConfig = config
             startActivityForResult(permissionIntent, VPN_REQUEST)
+        }
+    }
+
+    private fun togglePsiphon() {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        if (prefs.getBoolean("psiphon_running", false)) {
+            // Disconnect Psiphon
+            startService(Intent(this, PsiphonVpnService::class.java)
+                .setAction(PsiphonVpnService.ACTION_DISCONNECT))
+            showDisconnected("Disconnecting")
+            return
+        }
+        // Prepare VPN
+        val permissionIntent = VpnService.prepare(this)
+        if (permissionIntent == null) {
+            startPsiphonVpn()
+        } else {
+            pendingPsiphonStart = true
+            startActivityForResult(permissionIntent, VPN_REQUEST)
+        }
+    }
+
+    private fun startPsiphonVpn() {
+        showConnecting()
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putBoolean("psiphon_running", true).apply()
+        try {
+            startForegroundService(Intent(this, PsiphonVpnService::class.java)
+                .setAction(PsiphonVpnService.ACTION_CONNECT))
+        } catch (e: Exception) {
+            getSharedPreferences("settings", MODE_PRIVATE).edit()
+                .putBoolean("psiphon_running", false).apply()
+            showDisconnected("Psiphon error: ${e.message}")
         }
     }
 
@@ -2417,6 +2457,7 @@ class MainActivity : Activity() {
         MASQUE("MASQUE", "masque", "HTTP/3 tunnel"),
         WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
+        PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel (no config)"),
     }
 
     private enum class ConnectionType(val label: String, val description: String) {
