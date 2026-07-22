@@ -16,6 +16,7 @@ import java.io.File
 import java.io.InputStreamReader
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import studio.cluvex.aethery.ConnectionLog
 
 /**
  * PsiphonVpnService — runs Psiphon as a local SOCKS5 proxy (NOT VPN mode)
@@ -94,8 +95,11 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         try {
             log("Creating PsiphonTunnel instance…")
             tunnel = PsiphonTunnel.newPsiphonTunnel(this)
-            // We DO NOT call setVpnMode — runs as local SOCKS proxy
-            // to avoid TUN collision with Aethery's main VpnService.
+            // VPN mode — Psiphon internally creates VpnService.Builder
+            // and sets up TUN routing. protect() in bindToDevice prevents
+            // routing loops.
+            tunnel?.setVpnMode(true)
+            tunnel?.setClientPlatformAffixes("", "")
 
             log("Calling startTunneling…")
             tunnel?.startTunneling("")
@@ -167,7 +171,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     /**
      * Bind socket to the VPN interface to prevent routing loops.
      * If we're NOT using VPN mode, this is a no-op (still implemented
-     * for safety if setVpnMode is ever enabled).
+    )
      */
     override fun bindToDevice(fd: Long) {
         val ok = protect(fd.toInt())
@@ -177,7 +181,11 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     override fun onDiagnosticMessage(message: String) {
         Log.i(TAG, "[Psiphon] $message")
-        log(message)
+        ConnectionLog.record("[Psiphon] $message")
+        synchronized(logBuffer) {
+            logBuffer.add("[Psiphon] $message")
+            if (logBuffer.size > 200) logBuffer.removeAt(0)
+        }
     }
 
     override fun onConnecting() {
@@ -268,10 +276,9 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     // ── Logging (thread-safe, in-memory ring buffer) ───────────
 
     private fun log(msg: String) {
-        val ts = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
-        val line = "[$ts] $msg"
+        ConnectionLog.record(msg)
         synchronized(logBuffer) {
-            logBuffer.add(line)
+            logBuffer.add(msg)
             if (logBuffer.size > 200) logBuffer.removeAt(0)
         }
         Log.d(TAG, msg)
