@@ -2078,13 +2078,15 @@ class MainActivity : Activity() {
     private fun togglePsiphon() {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         if (prefs.getBoolean("psiphon_running", false)) {
-            // Disconnect Psiphon
-            startService(Intent(this, PsiphonVpnService::class.java)
-                .setAction(PsiphonVpnService.ACTION_DISCONNECT))
+            // Disconnect everything
+            startService(Intent(this, PsiphonTunService::class.java)
+                .setAction(PsiphonTunService.ACTION_DISCONNECT))
+            startService(Intent(this, PsiphonProxyService::class.java)
+                .setAction(PsiphonProxyService.ACTION_STOP_ALL))
             showDisconnected("Disconnecting")
             return
         }
-        // Prepare VPN
+        // Prepare VPN permission (for TUN)
         val permissionIntent = VpnService.prepare(this)
         if (permissionIntent == null) {
             startPsiphonVpn()
@@ -2099,8 +2101,12 @@ class MainActivity : Activity() {
         getSharedPreferences("settings", MODE_PRIVATE).edit()
             .putBoolean("psiphon_running", true).apply()
         try {
-            startForegroundService(Intent(this, PsiphonVpnService::class.java)
-                .setAction(PsiphonVpnService.ACTION_CONNECT))
+            // 1. Start Psiphon as SOCKS5 proxy
+            startForegroundService(Intent(this, PsiphonProxyService::class.java)
+                .setAction(PsiphonProxyService.ACTION_START_PROXY))
+            // 2. Start TUN with split tunneling → bridges to proxy :10808
+            startForegroundService(Intent(this, PsiphonTunService::class.java)
+                .setAction(PsiphonTunService.ACTION_CONNECT))
         } catch (e: Exception) {
             getSharedPreferences("settings", MODE_PRIVATE).edit()
                 .putBoolean("psiphon_running", false).apply()

@@ -423,7 +423,7 @@ class AetherVpnService : VpnService() {
         private const val MAX_RECONNECT_ATTEMPTS = 3
         private const val RECONNECT_DELAY_MS = 3000L
 
-        private val IRANIAN_PACKAGES = listOf(
+        val IRANIAN_PACKAGES = listOf(
             "ir.divar",
             "ir.co.bazaar",
             "com.digikala",
