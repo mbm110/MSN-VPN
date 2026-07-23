@@ -131,6 +131,7 @@ class MainActivity : Activity() {
                         .putBoolean("psiphon_running", false).apply()
                 }
                 "KILL_SWITCH_BLOCKED" -> connectionTimer.text = "Kill Switch: blocking traffic"
+                "FETCH_IP" -> fetchPublicIp()
             }
         }
     }
@@ -243,7 +244,20 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         renderStatus()
-        appUpdater.resumeInstallIfPermitted()
+        appUpdater.resumeInstallIfPermitted()        // Restore Psiphon state if running
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        if (prefs.getBoolean("psiphon_running", false)) {
+            visualState = ConnectionControl.State.CONNECTED
+            connectionControl.state = visualState
+            connectionTitle.text = "Connected"
+            connectionDetail.text = "Psiphon tunnel is active"
+            connectionTitle.setTextColor(connected)
+            startTimerUpdates()
+            fetchPublicIp()
+            refreshUsageDisplay()
+        }
+    
+
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

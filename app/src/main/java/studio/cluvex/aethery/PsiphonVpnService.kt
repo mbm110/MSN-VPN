@@ -16,6 +16,7 @@ import java.io.File
 import java.io.InputStreamReader
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import android.os.SystemClock
 import studio.cluvex.aethery.ConnectionLog
 
 /**
@@ -202,13 +203,11 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 "ListeningSocksProxyPort" -> {
                     val port = notice.optInt("port", 10808)
                     log("✅ SOCKS proxy listening on :$port — tunnel ready")
-                    broadcastStatus(AetherVpnService.STATUS_CONNECTED)
                 }
                 "Tunnels" -> {
                     val count = notice.optInt("count", 0)
                     if (count > 0) {
                         log("✅ $count tunnel(s) established")
-                        broadcastStatus(AetherVpnService.STATUS_CONNECTED)
                     }
                 }
                 "ConnectingServer" -> {
@@ -233,6 +232,16 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         val ks = if (killSwitchEnabled) " ⛔KS" else ""
         updateFg("Connected$ks")
         broadcastStatus(AetherVpnService.STATUS_CONNECTED)
+        // Retry IP fetch after 2s (TUN may not be fully routing yet)
+        android.os.Handler(mainLooper).postDelayed({
+            broadcastStatus("FETCH_IP")
+        }, 2000)
+        // Save session start + reset data counters for UI timer/usage
+        prefs().edit()
+            .putLong("session_start", SystemClock.elapsedRealtime())
+            .putLong("live_rx", 0L).putLong("live_tx", 0L)
+            .putLong("total_rx", 0L).putLong("total_tx", 0L)
+            .apply()
     }
 
     override fun onExiting() {
