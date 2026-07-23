@@ -297,12 +297,13 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     private fun fetchPublicIpBg() {
         try {
-            // These connections go through the TUN (not protect()ed)
+            // Get IPv4 via HTTPS
             val ip = httpGet("https://api.ipify.org?format=json")?.let { json ->
                 Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
             }
+            // Get country via HTTPS (HTTP may not route through Psiphon VPN TUN)
             val country = if (ip != null) {
-                httpGet("http://ip-api.com/json/$ip?fields=countryCode")?.let { json ->
+                httpGet("https://ip-api.com/json/$ip?fields=countryCode")?.let { json ->
                     Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
                 }
             } else null
@@ -354,8 +355,9 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         config.put("ServerEntrySignaturePublicKey", "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=")
         config.put("ExchangeObfuscationKey", "DpXzloJk1Hw6aSzmKKky0xcahsEHubch81Mi6K0XMlU=")
 
-        config.put("LocalSocksProxyPort", SOCKS_PORT)
-        config.put("LocalHttpProxyPort", HTTP_PORT)
+        // No SOCKS/HTTP ports in VPN mode — they interfere with setVpnMode(true)
+        config.put("LocalSocksProxyPort", 0)
+        config.put("LocalHttpProxyPort", 0)
 
         val dataDir = File(filesDir, "psiphon_data")
         dataDir.mkdirs()

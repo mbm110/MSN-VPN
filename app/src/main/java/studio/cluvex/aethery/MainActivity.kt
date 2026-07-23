@@ -119,19 +119,23 @@ class MainActivity : Activity() {
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            when (intent.getStringExtra(AetherVpnService.EXTRA_STATUS)) {
-                AetherVpnService.STATUS_CONNECTING -> showConnecting()
-                AetherVpnService.STATUS_STARTING -> showStarting()
-                AetherVpnService.STATUS_SCANNING -> showScanning()
-                AetherVpnService.STATUS_CONNECTED -> showConnected()
-                AetherVpnService.STATUS_FAILED -> showFailure(intent.getStringExtra(AetherVpnService.EXTRA_DETAIL))
-                AetherVpnService.STATUS_DISCONNECTED -> {
-                    showDisconnected()
-                    getSharedPreferences("settings", MODE_PRIVATE).edit()
-                        .putBoolean("psiphon_running", false).apply()
+            when (intent.action) {
+                AetherVpnService.ACTION_STATUS -> {
+                    when (intent.getStringExtra(AetherVpnService.EXTRA_STATUS)) {
+                        AetherVpnService.STATUS_CONNECTING -> showConnecting()
+                        AetherVpnService.STATUS_STARTING -> showStarting()
+                        AetherVpnService.STATUS_SCANNING -> showScanning()
+                        AetherVpnService.STATUS_CONNECTED -> showConnected()
+                        AetherVpnService.STATUS_FAILED -> showFailure(intent.getStringExtra(AetherVpnService.EXTRA_DETAIL))
+                        AetherVpnService.STATUS_DISCONNECTED -> {
+                            showDisconnected()
+                            getSharedPreferences("settings", MODE_PRIVATE).edit()
+                                .putBoolean("psiphon_running", false).apply()
+                        }
+                        "KILL_SWITCH_BLOCKED" -> connectionTimer.text = "Kill Switch: blocking traffic"
+                        "FETCH_IP" -> fetchPublicIp()
+                    }
                 }
-                "KILL_SWITCH_BLOCKED" -> connectionTimer.text = "Kill Switch: blocking traffic"
-                "FETCH_IP" -> fetchPublicIp()
                 PsiphonVpnService.ACTION_IP_RESULT -> {
                     val ip = intent.getStringExtra(PsiphonVpnService.EXTRA_IP) ?: ""
                     val country = intent.getStringExtra(PsiphonVpnService.EXTRA_COUNTRY) ?: ""
@@ -238,13 +242,14 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        val filter = IntentFilter(AetherVpnService.ACTION_STATUS)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val filter = IntentFilter(AetherVpnService.ACTION_STATUS).apply {
+            addAction(PsiphonVpnService.ACTION_IP_RESULT)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
             registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
+        else
             @Suppress("DEPRECATION")
             registerReceiver(statusReceiver, filter)
-        }
         receiverRegistered = true
     }
 
@@ -342,9 +347,9 @@ class MainActivity : Activity() {
             val ip = httpGet("https://api.ipify.org?format=json")?.let { json ->
                 Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
             }
-            // Step 2: get country code from ip-api.com (HTTP with cleartext)
+            // Step 2: get country code from ip-api.com (HTTPS)
             val country = if (ip != null) {
-                httpGet("http://ip-api.com/json/$ip?fields=countryCode")?.let { json ->
+                httpGet("https://ip-api.com/json/$ip?fields=countryCode")?.let { json ->
                     Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
                 }
             } else null
