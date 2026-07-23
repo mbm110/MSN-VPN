@@ -781,9 +781,10 @@ async fn run_wireguard_tunnel(
             inbound_rx,
             outbound_tx,
         )?;
+        let upstream_proxy = options.upstream_proxy;
         tokio::spawn(async move {
             log::info!("[+] socks5 server listening on {listen}");
-            socks::serve(listen, stack, options.upstream_proxy).await
+            socks::serve(listen, stack, upstream_proxy).await
         })
     };
 
