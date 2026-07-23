@@ -650,7 +650,6 @@ async fn run_wireguard(
     let multi = candidates.len() > 1;
 
     let private_key = identity.private_key_bytes()?;
-    let proxy = options.upstream_proxy;
     let peer_public = identity.peer_public_key_bytes()?;
     let ipv4: std::net::Ipv4Addr = identity
         .ipv4
@@ -794,7 +793,7 @@ async fn run_wireguard_tunnel(
         )?;
         tokio::spawn(async move {
             log::info!("[+] socks5 server listening on {listen}");
-            socks::serve(listen, stack, proxy).await
+            socks::serve(listen, stack, None).await
         })
     };
 
