@@ -140,11 +140,6 @@ class MainActivity : Activity() {
                         "FETCH_IP" -> fetchPublicIp()
                     }
                 }
-                PsiphonVpnService.ACTION_READY -> {
-                    // Psiphon SOCKS proxy is ready, now start AetherVpnService with upstream_proxy
-                    val config = configJson()
-                    startAetherVpn(config)
-                }
                 PsiphonVpnService.ACTION_IP_RESULT -> {
                     val ip = intent.getStringExtra(PsiphonVpnService.EXTRA_IP) ?: ""
                     val country = intent.getStringExtra(PsiphonVpnService.EXTRA_COUNTRY) ?: ""
@@ -252,7 +247,6 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         val filter = IntentFilter(AetherVpnService.ACTION_STATUS).apply {
-            addAction(PsiphonVpnService.ACTION_READY)
             addAction(PsiphonVpnService.ACTION_IP_RESULT)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
@@ -2164,14 +2158,16 @@ class MainActivity : Activity() {
 
     private fun connect(config: String) {
         showConnecting()
-        // For Psiphon VPN mode: wait for Psiphon to connect, THEN start AetherVpnService
+        // Psiphon VPN mode: start BOTH services simultaneously
+        // AetherVpnService will poll for Psiphon's SOCKS port before creating TUN
         if (selectedProtocol == Protocol.PSIPHON && connectionType() == ConnectionType.VPN) {
             getSharedPreferences("settings", MODE_PRIVATE).edit()
                 .putBoolean("psiphon_running", true).apply()
             startForegroundService(Intent(this, PsiphonVpnService::class.java)
                 .setAction(PsiphonVpnService.ACTION_CONNECT)
                 .putExtra(PsiphonVpnService.EXTRA_PORT, psiphonProxyPort()))
-            return // AetherVpnService starts when PSIPHON_READY is received
+            startAetherVpn(config)
+            return
         }
         startAetherVpn(config)
     }

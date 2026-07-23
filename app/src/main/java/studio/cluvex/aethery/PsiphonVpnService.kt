@@ -195,12 +195,14 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
         try {
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort))
             val ip = socksGet("https://api.ipify.org?format=json", proxy)?.let { json ->
-                try { JSONObject(json).optString("ip", null) } catch (_: Exception) { null }
-            }
+                try { JSONObject(json).optString("ip", "") } catch (_: Exception) { "" }
+            }?.ifEmpty { null }
             val country = if (ip != null) {
-                socksGet("https://ip-api.com/json/$ip?fields=countryCode", proxy)?.let { json ->
-                    try { JSONObject(json).optString("countryCode", null) } catch (_: Exception) { null }
-                }
+                val cResp = socksGet("https://ip-api.com/json/$ip?fields=countryCode", proxy)
+                log("Country API response: ${cResp?.take(100) ?: "null"}")
+                cResp?.let { json ->
+                    try { JSONObject(json).optString("countryCode", "") } catch (_: Exception) { "" }
+                }?.ifEmpty { null }
             } else null
             sendBroadcast(Intent(ACTION_IP_RESULT).apply {
                 putExtra(EXTRA_IP, ip ?: ""); putExtra(EXTRA_COUNTRY, country ?: "")

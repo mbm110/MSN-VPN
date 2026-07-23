@@ -91,7 +91,7 @@ class AetherVpnService : VpnService() {
         sendStatus(STATUS_STARTING)
         worker.execute {
             try {
-                val protocol = config.substringAfter("\"protocol\":\"").substringBefore('\"').uppercase()
+                val protocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
                 ConnectionLog.record("Preparing $protocol identity")
                 val result = if (vpnMode) {
                     val addresses = NativeCore.prepare(config)
@@ -113,6 +113,8 @@ class AetherVpnService : VpnService() {
                     ConnectionLog.record("Scanning gateways for VPN")
                     sendStatus(STATUS_SCANNING)
                     watchReadiness()
+                    // Wait for upstream SOCKS proxy (Psiphon) before starting Rust core
+                    waitForUpstreamProxy(config)
                     NativeCore.start(config, tun!!.fd)
                 } else {
                     ConnectionLog.record("Starting local SOCKS5 proxy")
@@ -185,6 +187,28 @@ class AetherVpnService : VpnService() {
         getSharedPreferences("settings", MODE_PRIVATE).edit()
             .putBoolean("vpn_connected", false).apply()
         if (notify) sendStatus(STATUS_DISCONNECTED)
+    }
+
+    private fun waitForUpstreamProxy(config: String) {
+        try {
+            val json = org.json.JSONObject(config)
+            val proxy = json.optString("upstream_proxy", "")
+            if (proxy.isEmpty()) return // No upstream proxy needed
+            val port = proxy.substringAfterLast(":").toIntOrNull() ?: return
+            ConnectionLog.record("Waiting for upstream SOCKS proxy on :$port...")
+            val deadline = System.currentTimeMillis() + 30_000L
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    java.net.Socket("127.0.0.1", port).use { 
+                        ConnectionLog.record("Upstream SOCKS proxy ready on :$port")
+                        return 
+                    }
+                } catch (_: Exception) {
+                    Thread.sleep(500)
+                }
+            }
+            ConnectionLog.record("Warning: upstream proxy not ready after 30s, proceeding anyway")
+        } catch (_: Exception) {}
     }
 
     private fun scheduleReconnect() {
