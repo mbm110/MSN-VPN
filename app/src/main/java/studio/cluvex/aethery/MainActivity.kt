@@ -132,6 +132,21 @@ class MainActivity : Activity() {
                 }
                 "KILL_SWITCH_BLOCKED" -> connectionTimer.text = "Kill Switch: blocking traffic"
                 "FETCH_IP" -> fetchPublicIp()
+                PsiphonVpnService.ACTION_IP_RESULT -> {
+                    val ip = intent.getStringExtra(PsiphonVpnService.EXTRA_IP) ?: ""
+                    val country = intent.getStringExtra(PsiphonVpnService.EXTRA_COUNTRY) ?: ""
+                    val flag = if (country.length == 2) {
+                        country.uppercase().map { cp ->
+                            String(Character.toChars(0x1F1E6 + (cp - 'A')))
+                        }.joinToString("")
+                    } else ""
+                    val result = when {
+                        ip.isNotEmpty() && flag.isNotEmpty() -> "$flag $ip"
+                        ip.isNotEmpty() -> ip
+                        else -> "IP: unavailable"
+                    }
+                    connectionIp.text = "IP: $result"
+                }
             }
         }
     }
