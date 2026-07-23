@@ -2162,11 +2162,11 @@ class MainActivity : Activity() {
             .putExtra(AetherVpnService.EXTRA_VPN_MODE, connectionType() == ConnectionType.VPN)
         if (selectedProtocol == Protocol.PSIPHON && connectionType() == ConnectionType.VPN) {
             // Full tunnel via Psiphon proxy → Rust core → TUN
-            intent.putExtra("upstream_proxy", "127.0.0.1:${socksPort()}")
+            // upstream_proxy is in configJson()
             // Start Psiphon proxy first, AetherVpnService waits for PSIPHON_READY
             startForegroundService(Intent(this, PsiphonVpnService::class.java)
                 .setAction(PsiphonVpnService.ACTION_CONNECT)
-                .putExtra(PsiphonVpnService.EXTRA_PORT, socksPort()))
+                .putExtra(PsiphonVpnService.EXTRA_PORT, if (connectionType() == ConnectionType.VPN) psiphonProxyPort() else socksPort()))
         }
         startForegroundService(intent)
     }
@@ -2186,9 +2186,11 @@ class MainActivity : Activity() {
         put("tls_curve_preset", tlsCurvePreset().coreName)
         put("wireguard_data_check", wireGuardDataCheck())
         if (selectedProtocol == Protocol.PSIPHON && connectionType() == ConnectionType.VPN) {
-            put("upstream_proxy", "127.0.0.1:${socksPort()}")
+            put("upstream_proxy", "127.0.0.1:${psiphonProxyPort()}")
         }
     }.toString()
+
+    private fun psiphonProxyPort(): Int = socksPort() + 1000
 
     private fun renderStatus() {
         if (!NativeCore.isRunning() && visualState == ConnectionControl.State.CONNECTED) showDisconnected()
