@@ -189,20 +189,22 @@ fn parse_dns_a(resp: &[u8]) -> Option<IpAddr> {
         if pos + 10 > resp.len() {
             return None;
         }
-        let typ = u16::from_be_bytes([resp[pos], resp[pos + 1]]);
-        let _ = u16::from_be_bytes([resp[pos + 2], resp[pos + 3]]);
-        let rdlength = u16::from_be_bytes([resp[pos + 8], resp[pos + 9]]) as usize;
-        if typ == 1 && rdlength == 4 {
+        let rtype = u16::from_be_bytes([resp[pos], resp[pos + 1]]);
+        let rdlen = u16::from_be_bytes([resp[pos + 8], resp[pos + 9]]) as usize;
+        pos += 10;
+        if pos + rdlen > resp.len() {
+            return None;
+        }
+        if rtype == 1 && rdlen == 4 {
             return Some(IpAddr::V4(Ipv4Addr::new(
-                resp[pos + 10],
-                resp[pos + 11],
-                resp[pos + 12],
-                resp[pos + 13],
+                resp[pos],
+                resp[pos + 1],
+                resp[pos + 2],
+                resp[pos + 3],
             )));
         }
-        pos += 10 + rdlength;
+        pos += rdlen;
     }
-
     None
 }
 
@@ -228,30 +230,24 @@ async fn handle_connect(
 ) -> Result<()> {
     if let Some(proxy_addr) = upstream {
         // Route through upstream SOCKS5 proxy
-        let proxy = match TcpStream::connect(proxy_addr).await {
+        let mut proxy = match TcpStream::connect(proxy_addr).await {
             Ok(p) => p,
             Err(e) => {
                 let _ = reply(&mut sock, REP_GENERAL).await;
                 return Err(AetherError::Other(format!("upstream connect failed: {e}")));
             }
         };
-        reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
-
-        // Forward data bidirectionally after SOCKS5 handshake
-        let (mut rd, mut wr) = sock.into_split();
-        let (mut prd, mut pwr) = proxy.into_split();
-        
-        // Send CONNECT to upstream proxy
+        // Send SOCKS5 CONNECT to upstream for the target
         let connect_pkt = match &target {
-            Target::Ip(ip) => {
+            Target::Ip(IpAddr::V4(v4)) => {
                 let mut pkt = vec![VER, CMD_CONNECT, 0x00, ATYP_V4];
-                match ip {
-                    IpAddr::V4(v4) => pkt.extend_from_slice(&v4.octets()),
-                    IpAddr::V6(v6) => {
-                        pkt[3] = ATYP_V6;
-                        pkt.extend_from_slice(&v6.octets());
-                    }
-                }
+                pkt.extend_from_slice(&v4.octets());
+                pkt.extend_from_slice(&port.to_be_bytes());
+                pkt
+            }
+            Target::Ip(IpAddr::V6(v6)) => {
+                let mut pkt = vec![VER, CMD_CONNECT, 0x00, ATYP_V6];
+                pkt.extend_from_slice(&v6.octets());
                 pkt.extend_from_slice(&port.to_be_bytes());
                 pkt
             }
@@ -262,41 +258,41 @@ async fn handle_connect(
                 pkt
             }
         };
-        
-        if pwr.write_all(&connect_pkt).await.is_err() {
+        if proxy.write_all(&connect_pkt).await.is_err() {
+            let _ = reply(&mut sock, REP_GENERAL).await;
             return Err(AetherError::Other("upstream write failed".into()));
         }
-        
-        // Read upstream SOCKS5 response (first 10 bytes for IPv4)
+        // Read upstream SOCKS5 reply (at least 10 bytes for IPv4)
         let mut resp = vec![0u8; 10];
-        if prd.read_exact(&mut resp).await.is_err() || resp[1] != REP_OK {
+        if proxy.read_exact(&mut resp).await.is_err() || resp[1] != REP_OK {
             let _ = reply(&mut sock, REP_GENERAL).await;
-            return Err(AetherError::Other("upstream rejected connection".into()));
+            return Err(AetherError::Other("upstream rejected".into()));
         }
-        
-        // Relay data: client -> upstream
-        let up_client = tokio::spawn(async move {
+        reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+        // Bidirectional relay
+        let (mut sock_rd, mut sock_wr) = sock.into_split();
+        let (mut proxy_rd, mut proxy_wr) = proxy.into_split();
+        let c2p = tokio::spawn(async move {
             let mut buf = vec![0u8; 16384];
             loop {
-                match rd.read(&mut buf).await {
-                    Ok(0) => { let _ = pwr.shutdown().await; break; }
-                    Ok(n) => { if pwr.write_all(&buf[..n]).await.is_err() { break; } }
-                    Err(_) => { let _ = pwr.shutdown().await; break; }
+                match sock_rd.read(&mut buf).await {
+                    Ok(0) => { let _ = proxy_wr.shutdown().await; break; }
+                    Ok(n) => { if proxy_wr.write_all(&buf[..n]).await.is_err() { break; } }
+                    Err(_) => { let _ = proxy_wr.shutdown().await; break; }
                 }
             }
         });
-        
-        // Relay data: upstream -> client
         let mut buf = vec![0u8; 16384];
         loop {
-            match prd.read(&mut buf).await {
+            match proxy_rd.read(&mut buf).await {
                 Ok(0) => break,
-                Ok(n) => { if wr.write_all(&buf[..n]).await.is_err() { break; } }
+                Ok(n) => { if sock_wr.write_all(&buf[..n]).await.is_err() { break; } }
                 Err(_) => break,
             }
         }
-        let _ = wr.shutdown().await;
-        up_client.abort();
+        let _ = sock_wr.shutdown().await;
+        c2p.abort();
+        Ok(())
     } else {
         // Direct connection through netstack
         let ip = match resolve(&stack, target).await {
@@ -343,6 +339,16 @@ async fn handle_connect(
         Ok(())
     }
 }
+    while let Some(chunk) = from_stack.recv().await {
+        if wr.write_all(&chunk).await.is_err() {
+            break;
+        }
+    }
+
+    let _ = wr.shutdown().await;
+    up.abort();
+    Ok(())
+}
 
 async fn handle_udp_associate(mut sock: TcpStream, stack: StackHandle, bind_ip: IpAddr) -> Result<()> {
     let relay = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
@@ -361,55 +367,96 @@ async fn handle_udp_associate(mut sock: TcpStream, stack: StackHandle, bind_ip: 
             r = relay.recv_from(&mut cbuf) => {
                 let (n, from) = match r { Ok(v) => v, Err(_) => break };
                 client = Some(from);
-
-                // Build SOCKS5 UDP request header
-                let atyp = if from.ip().is_ipv4() { ATYP_V4 } else { ATYP_V6 };
-                let mut pkt = vec![0x00, 0x00, 0x00, atyp];
-                match from.ip() {
-                    IpAddr::V4(v4) => pkt.extend_from_slice(&v4.octets()),
-                    IpAddr::V6(v6) => pkt.extend_from_slice(&v6.octets()),
+                if let Some((dst, payload)) = parse_udp_request(&cbuf[..n]) {
+                    let dst = match dst {
+                        Target::Ip(ip) => SocketAddr::new(ip, payload.0),
+                        Target::Domain(name) => {
+                            match dns_resolve(&stack, &name).await {
+                                Ok(ip) => SocketAddr::new(ip, payload.0),
+                                Err(_) => continue,
+                            }
+                        }
+                    };
+                    let _ = sender.send_to(dst, payload.1).await;
                 }
-                pkt.extend_from_slice(&from.port().to_be_bytes());
-                pkt.extend_from_slice(&cbuf[..n]);
-
-                if sender.send(pkt).await.is_err() { break; }
             }
-            r = from_stack.recv() => {
-                let chunk = match r { Some(c) => c, None => break };
-                if chunk.len() < 10 { continue; }
-                let atyp = chunk[3];
-                let addr_start = 4;
-                let addr_len = match atyp {
-                    ATYP_V4 => 4,
-                    ATYP_V6 => 16,
-                    ATYP_DOMAIN => {
-                        if chunk.len() < 5 { continue; }
-                        chunk[4] as usize
-                    }
-                    _ => continue,
-                };
-                let header_len = addr_start + addr_len + 2;
-                if chunk.len() < header_len { continue; }
-                let port = u16::from_be_bytes([chunk[header_len - 2], chunk[header_len - 1]]);
-                let dest = match atyp {
-                    ATYP_V4 => {
-                        let mut b = [0u8; 4];
-                        b.copy_from_slice(&chunk[addr_start..addr_start + 4]);
-                        SocketAddr::new(IpAddr::V4(Ipv4Addr::from(b)), port)
-                    }
-                    ATYP_V6 => {
-                        let mut b = [0u8; 16];
-                        b.copy_from_slice(&chunk[addr_start..addr_start + 16]);
-                        SocketAddr::new(IpAddr::V6(b.into()), port)
-                    }
-                    ATYP_DOMAIN => continue, // skip domain for now
-                    _ => continue,
-                };
-                if let Some(client_addr) = client {
-                    let _ = relay.send_to(&chunk[header_len..], dest).await;
+
+            maybe = from_stack.recv() => {
+                let (src, data) = match maybe { Some(v) => v, None => break };
+                if let Some(c) = client {
+                    let pkt = build_udp_reply(src, &data);
+                    let _ = relay.send_to(&pkt, c).await;
                 }
+            }
+
+            r = sock.read(&mut ctrl) => {
+                match r { Ok(0) | Err(_) => break, Ok(_) => {} }
             }
         }
     }
+
+    sender.close().await;
     Ok(())
+}
+
+fn parse_udp_request(buf: &[u8]) -> Option<(Target, (u16, Vec<u8>))> {
+    if buf.len() < 4 || buf[2] != 0 {
+        return None;
+    }
+    let atyp = buf[3];
+    let mut pos = 4;
+    let target = match atyp {
+        ATYP_V4 => {
+            if buf.len() < pos + 4 {
+                return None;
+            }
+            let ip = Ipv4Addr::new(buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]);
+            pos += 4;
+            Target::Ip(IpAddr::V4(ip))
+        }
+        ATYP_V6 => {
+            if buf.len() < pos + 16 {
+                return None;
+            }
+            let mut b = [0u8; 16];
+            b.copy_from_slice(&buf[pos..pos + 16]);
+            pos += 16;
+            Target::Ip(IpAddr::V6(b.into()))
+        }
+        ATYP_DOMAIN => {
+            let len = *buf.get(pos)? as usize;
+            pos += 1;
+            if buf.len() < pos + len {
+                return None;
+            }
+            let name = String::from_utf8_lossy(&buf[pos..pos + len]).to_string();
+            pos += len;
+            Target::Domain(name)
+        }
+        _ => return None,
+    };
+
+    if buf.len() < pos + 2 {
+        return None;
+    }
+    let port = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+    pos += 2;
+    Some((target, (port, buf[pos..].to_vec())))
+}
+
+fn build_udp_reply(src: SocketAddr, data: &[u8]) -> Vec<u8> {
+    let mut pkt = vec![0x00, 0x00, 0x00];
+    match src.ip() {
+        IpAddr::V4(v4) => {
+            pkt.push(ATYP_V4);
+            pkt.extend_from_slice(&v4.octets());
+        }
+        IpAddr::V6(v6) => {
+            pkt.push(ATYP_V6);
+            pkt.extend_from_slice(&v6.octets());
+        }
+    }
+    pkt.extend_from_slice(&src.port().to_be_bytes());
+    pkt.extend_from_slice(data);
+    pkt
 }

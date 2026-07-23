@@ -62,6 +62,7 @@ impl Default for NativeStartOptions {
             masque_transport: "h3".into(),
             tls_curve_preset: "chrome".into(),
             wireguard_data_check: true,
+            upstream_proxy: None,
         }
     }
 }
@@ -93,6 +94,7 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.wireguard_data_check = value.wireguard_data_check;
         options.upstream_proxy = value
             .upstream_proxy
+            .filter(|s| !s.trim().is_empty())
             .map(|proxy| parse_address("upstream_proxy", &proxy))
             .transpose()?;
         Ok(options)
