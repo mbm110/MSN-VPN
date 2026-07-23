@@ -2094,12 +2094,19 @@ class MainActivity : Activity() {
 
 
     private fun toggleTunnel() {
-        if (selectedProtocol == Protocol.PSIPHON) {
-            togglePsiphon()
+        if (NativeCore.isRunning()) {
+            // Stop AetherVpnService
+            startService(Intent(this, AetherVpnService::class.java).setAction(AetherVpnService.ACTION_DISCONNECT))
+            // Also stop Psiphon proxy if running
+            if (getSharedPreferences("settings", MODE_PRIVATE).getBoolean("psiphon_running", false)) {
+                startService(Intent(this, PsiphonVpnService::class.java).setAction(PsiphonVpnService.ACTION_DISCONNECT))
+            }
+            showDisconnected("Disconnecting")
             return
         }
-        if (NativeCore.isRunning()) {
-            startService(Intent(this, AetherVpnService::class.java).setAction(AetherVpnService.ACTION_DISCONNECT))
+        // Psiphon proxy might be running in standalone mode
+        if (selectedProtocol == Protocol.PSIPHON && getSharedPreferences("settings", MODE_PRIVATE).getBoolean("psiphon_running", false)) {
+            startService(Intent(this, PsiphonVpnService::class.java).setAction(PsiphonVpnService.ACTION_DISCONNECT))
             showDisconnected("Disconnecting")
             return
         }
@@ -2149,10 +2156,19 @@ class MainActivity : Activity() {
 
     private fun connect(config: String) {
         showConnecting()
-        startForegroundService(Intent(this, AetherVpnService::class.java)
+        val intent = Intent(this, AetherVpnService::class.java)
             .setAction(AetherVpnService.ACTION_CONNECT)
             .putExtra(AetherVpnService.EXTRA_CONFIG, config)
-            .putExtra(AetherVpnService.EXTRA_VPN_MODE, connectionType() == ConnectionType.VPN))
+            .putExtra(AetherVpnService.EXTRA_VPN_MODE, connectionType() == ConnectionType.VPN)
+        if (selectedProtocol == Protocol.PSIPHON && connectionType() == ConnectionType.VPN) {
+            // Full tunnel via Psiphon proxy → Rust core → TUN
+            intent.putExtra("upstream_proxy", "127.0.0.1:${socksPort()}")
+            // Start Psiphon proxy first, AetherVpnService waits for PSIPHON_READY
+            startForegroundService(Intent(this, PsiphonVpnService::class.java)
+                .setAction(PsiphonVpnService.ACTION_CONNECT)
+                .putExtra(PsiphonVpnService.EXTRA_PORT, socksPort()))
+        }
+        startForegroundService(intent)
     }
 
     private fun configJson(): String = org.json.JSONObject().apply {
@@ -2169,6 +2185,9 @@ class MainActivity : Activity() {
         put("retry_obfuscation_profiles", retryObfuscationProfiles())
         put("tls_curve_preset", tlsCurvePreset().coreName)
         put("wireguard_data_check", wireGuardDataCheck())
+        if (selectedProtocol == Protocol.PSIPHON && connectionType() == ConnectionType.VPN) {
+            put("upstream_proxy", "127.0.0.1:${socksPort()}")
+        }
     }.toString()
 
     private fun renderStatus() {

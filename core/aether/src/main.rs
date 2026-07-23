@@ -33,6 +33,7 @@ pub struct StartOptions {
     pub tls_curve_preset: TlsCurvePreset,
     pub wireguard_data_check: bool,
     pub tun_fd: Option<i32>,
+    pub upstream_proxy: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +106,7 @@ impl StartOptions {
             tls_curve_preset: TlsCurvePreset::Chrome,
             wireguard_data_check: true,
             tun_fd: None,
+            upstream_proxy: None,
         }
     }
 
@@ -187,6 +189,7 @@ pub async fn start(options: StartOptions) -> Result<()> {
                 options.masque_profile(),
                 options.tls_curve_preset,
                 options.tun_fd,
+                options.upstream_proxy,
             )
             .await
         }
@@ -219,8 +222,33 @@ pub async fn start(options: StartOptions) -> Result<()> {
                 options.listen,
                 options.wireguard_profile(),
                 options.tun_fd,
+                options.upstream_proxy,
             )
             .await
+        }
+        Protocol::Psiphon => {
+            log::info!("[+] Psiphon upstream proxy tunnel");
+            crate::ffi::record_log("Starting Psiphon upstream proxy tunnel");
+            let listen = options.listen;
+            let tun_fd = options.tun_fd;
+            let upstream = options.upstream_proxy;
+            let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+            let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+
+            if let Some(fd) = tun_fd {
+                log::info!("[+] Psiphon TUN bridge active (upstream proxy)");
+                tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx));
+            }
+
+            let stack = netstack::spawn(
+                "10.0.0.2",
+                "fd00::2",
+                TUNNEL_MTU,
+                inbound_tx,
+                outbound_rx,
+            )?;
+            log::info!("[+] SOCKS5 server listening on {listen} -> upstream {upstream:?}");
+            socks::serve(listen, stack, upstream).await
         }
     }
 }
@@ -232,11 +260,19 @@ pub async fn prepare(options: &StartOptions) -> Result<TunnelAddresses> {
     let identity = match options.protocol {
         Protocol::Masque => load_or_provision_masque(&masque_config_path(options)).await?,
         Protocol::WireGuard => load_or_provision_warp(&warp_config_path(options)).await?,
-        Protocol::WarpInWarp => {
-            let primary_path = warp_config_path(options);
-            let secondary_path = derive_sibling_path(&primary_path, "secondary");
-            load_or_provision_warp(&secondary_path).await?
-        }
+        Protocol::WarpInWarp => load_or_provision_warp(&warp_config_path(options)).await?,
+        Protocol::Psiphon => account::Identity {
+            ipv4: "10.0.0.2".into(),
+            ipv6: "fd00::2".into(),
+            device_id: "psiphon".into(),
+            private_key: String::new(),
+            peer_public_key: String::new(),
+            client_id: String::new(),
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            model: String::new(),
+            locale: String::new(),
+        },
     };
 
     Ok(TunnelAddresses {
@@ -464,6 +500,7 @@ async fn run_masque_tunnel(
     obfuscation_profile: &str,
     tls_curve_preset: TlsCurvePreset,
     tun_fd: Option<i32>,
+    upstream_proxy: Option<SocketAddr>,
 ) -> Result<()> {
     let (chans, internals) = quic::channels();
 
@@ -515,7 +552,7 @@ async fn run_masque_tunnel(
         });
         tokio::spawn(async move {
             log::info!("[+] socks5 server listening on {listen}");
-            socks::serve(listen, stack).await
+            socks::serve(listen, stack, options.upstream_proxy).await
         })
     };
 
@@ -760,7 +797,7 @@ async fn run_wireguard_tunnel(
         )?;
         tokio::spawn(async move {
             log::info!("[+] socks5 server listening on {listen}");
-            socks::serve(listen, stack).await
+            socks::serve(listen, stack, options.upstream_proxy).await
         })
     };
 
@@ -871,6 +908,7 @@ async fn run_warp_in_warp(
     listen: SocketAddr,
     obfuscation_profile: &str,
     tun_fd: Option<i32>,
+    upstream_proxy: Option<SocketAddr>,
 ) -> Result<()> {
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
     let outer_stack = establish_wg(
@@ -913,7 +951,7 @@ async fn run_warp_in_warp(
     .await?;
 
     log::info!("[+] socks5 server listening on {listen}");
-    socks::serve(listen, inner_stack).await
+    socks::serve(listen, inner_stack, options.upstream_proxy).await
 }
 
 async fn prompt_line(prompt: &str) -> Option<String> {
@@ -976,22 +1014,25 @@ pub enum Protocol {
     Masque,
     WireGuard,
     WarpInWarp,
+    Psiphon,
 }
 
 impl Protocol {
-    pub fn parse(s: &str) -> Protocol {
-        match s.trim().to_lowercase().as_str() {
-            "wg" | "wireguard" => Protocol::WireGuard,
-            "gool" | "wiw" | "warp-in-warp" | "warpinwarp" => Protocol::WarpInWarp,
-            _ => Protocol::Masque,
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_lowercase().as_str() {
+            "wireguard" | "wg" | "warp" => Self::WireGuard,
+            "warpinwarp" | "warp_in_warp" | "warp-in-warp" => Self::WarpInWarp,
+            "psiphon" => Self::Psiphon,
+            _ => Self::Masque,
         }
     }
 
     pub fn label(&self) -> &'static str {
         match self {
-            Protocol::Masque => "MASQUE",
-            Protocol::WireGuard => "WireGuard",
-            Protocol::WarpInWarp => "WARP-in-WARP (gool)",
+            Self::Masque => "Masque",
+            Self::WireGuard => "WireGuard",
+            Self::WarpInWarp => "Warp Inside Warp",
+            Self::Psiphon => "Psiphon",
         }
     }
 }

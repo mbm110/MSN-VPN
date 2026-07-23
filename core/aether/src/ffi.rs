@@ -41,6 +41,7 @@ struct NativeStartOptions {
     masque_transport: String,
     tls_curve_preset: String,
     wireguard_data_check: bool,
+    upstream_proxy: Option<String>,
 }
 
 impl Default for NativeStartOptions {
@@ -90,6 +91,10 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.masque_transport = MasqueTransport::parse(&value.masque_transport);
         options.tls_curve_preset = TlsCurvePreset::parse(&value.tls_curve_preset);
         options.wireguard_data_check = value.wireguard_data_check;
+        options.upstream_proxy = value
+            .upstream_proxy
+            .map(|proxy| parse_address("upstream_proxy", &proxy))
+            .transpose()?;
         Ok(options)
     }
 }

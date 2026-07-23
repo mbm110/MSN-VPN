@@ -22,7 +22,7 @@ enum Target {
     Domain(String),
 }
 
-pub async fn serve(listen: SocketAddr, stack: StackHandle) -> Result<()> {
+pub async fn serve(listen: SocketAddr, stack: StackHandle, upstream_proxy: Option<SocketAddr>) -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
     log::info!("socks5 listening on {listen}");
     let bind_ip = listen.ip();
@@ -30,15 +30,16 @@ pub async fn serve(listen: SocketAddr, stack: StackHandle) -> Result<()> {
     loop {
         let (sock, peer) = listener.accept().await?;
         let stack = stack.clone();
+        let upstream = upstream_proxy;
         tokio::spawn(async move {
-            if let Err(e) = handle_client(sock, stack, bind_ip).await {
+            if let Err(e) = handle_client(sock, stack, bind_ip, upstream).await {
                 log::debug!("socks client {peer} ended: {e}");
             }
         });
     }
 }
 
-async fn handle_client(mut sock: TcpStream, stack: StackHandle, bind_ip: IpAddr) -> Result<()> {
+async fn handle_client(mut sock: TcpStream, stack: StackHandle, bind_ip: IpAddr, upstream: Option<SocketAddr>) -> Result<()> {
     handshake(&mut sock).await?;
 
     let mut head = [0u8; 4];
@@ -52,7 +53,7 @@ async fn handle_client(mut sock: TcpStream, stack: StackHandle, bind_ip: IpAddr)
     let (target, port) = read_target(&mut sock, atyp).await?;
 
     match cmd {
-        CMD_CONNECT => handle_connect(sock, stack, target, port).await,
+        CMD_CONNECT => handle_connect(sock, stack, target, port, upstream).await,
         CMD_UDP_ASSOCIATE => handle_udp_associate(sock, stack, bind_ip).await,
         _ => {
             reply(&mut sock, REP_NOT_SUPPORTED).await?;
@@ -188,22 +189,20 @@ fn parse_dns_a(resp: &[u8]) -> Option<IpAddr> {
         if pos + 10 > resp.len() {
             return None;
         }
-        let rtype = u16::from_be_bytes([resp[pos], resp[pos + 1]]);
-        let rdlen = u16::from_be_bytes([resp[pos + 8], resp[pos + 9]]) as usize;
-        pos += 10;
-        if pos + rdlen > resp.len() {
-            return None;
-        }
-        if rtype == 1 && rdlen == 4 {
+        let typ = u16::from_be_bytes([resp[pos], resp[pos + 1]]);
+        let _ = u16::from_be_bytes([resp[pos + 2], resp[pos + 3]]);
+        let rdlength = u16::from_be_bytes([resp[pos + 8], resp[pos + 9]]) as usize;
+        if typ == 1 && rdlength == 4 {
             return Some(IpAddr::V4(Ipv4Addr::new(
-                resp[pos],
-                resp[pos + 1],
-                resp[pos + 2],
-                resp[pos + 3],
+                resp[pos + 10],
+                resp[pos + 11],
+                resp[pos + 12],
+                resp[pos + 13],
             )));
         }
-        pos += rdlen;
+        pos += 10 + rdlength;
     }
+
     None
 }
 
@@ -225,59 +224,124 @@ async fn handle_connect(
     stack: StackHandle,
     target: Target,
     port: u16,
+    upstream: Option<SocketAddr>,
 ) -> Result<()> {
-    let ip = match resolve(&stack, target).await {
-        Ok(ip) => ip,
-        Err(e) => {
-            let _ = reply(&mut sock, REP_GENERAL).await;
-            return Err(e);
-        }
-    };
+    if let Some(proxy_addr) = upstream {
+        // Route through upstream SOCKS5 proxy
+        let proxy = match TcpStream::connect(proxy_addr).await {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = reply(&mut sock, REP_GENERAL).await;
+                return Err(AetherError::Other(format!("upstream connect failed: {e}")));
+            }
+        };
+        reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
 
-    let dst = SocketAddr::new(ip, port);
-    let conn = match stack.open_tcp(dst).await {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = reply(&mut sock, REP_GENERAL).await;
-            return Err(e);
-        }
-    };
-
-    reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
-
-    let (sender, mut from_stack) = conn.into_split();
-    let (mut rd, mut wr) = sock.into_split();
-
-    let up = tokio::spawn(async move {
-        let mut buf = vec![0u8; 16384];
-        loop {
-            match rd.read(&mut buf).await {
-                Ok(0) => {
-                    sender.close().await;
-                    break;
-                }
-                Ok(n) => {
-                    if sender.send(buf[..n].to_vec()).await.is_err() {
-                        break;
+        // Forward data bidirectionally after SOCKS5 handshake
+        let (mut rd, mut wr) = sock.into_split();
+        let (mut prd, mut pwr) = proxy.into_split();
+        
+        // Send CONNECT to upstream proxy
+        let connect_pkt = match &target {
+            Target::Ip(ip) => {
+                let mut pkt = vec![VER, CMD_CONNECT, 0x00, ATYP_V4];
+                match ip {
+                    IpAddr::V4(v4) => pkt.extend_from_slice(&v4.octets()),
+                    IpAddr::V6(v6) => {
+                        pkt[3] = ATYP_V6;
+                        pkt.extend_from_slice(&v6.octets());
                     }
                 }
-                Err(_) => {
-                    sender.close().await;
-                    break;
+                pkt.extend_from_slice(&port.to_be_bytes());
+                pkt
+            }
+            Target::Domain(name) => {
+                let mut pkt = vec![VER, CMD_CONNECT, 0x00, ATYP_DOMAIN, name.len() as u8];
+                pkt.extend_from_slice(name.as_bytes());
+                pkt.extend_from_slice(&port.to_be_bytes());
+                pkt
+            }
+        };
+        
+        if pwr.write_all(&connect_pkt).await.is_err() {
+            return Err(AetherError::Other("upstream write failed".into()));
+        }
+        
+        // Read upstream SOCKS5 response (first 10 bytes for IPv4)
+        let mut resp = vec![0u8; 10];
+        if prd.read_exact(&mut resp).await.is_err() || resp[1] != REP_OK {
+            let _ = reply(&mut sock, REP_GENERAL).await;
+            return Err(AetherError::Other("upstream rejected connection".into()));
+        }
+        
+        // Relay data: client -> upstream
+        let up_client = tokio::spawn(async move {
+            let mut buf = vec![0u8; 16384];
+            loop {
+                match rd.read(&mut buf).await {
+                    Ok(0) => { let _ = pwr.shutdown().await; break; }
+                    Ok(n) => { if pwr.write_all(&buf[..n]).await.is_err() { break; } }
+                    Err(_) => { let _ = pwr.shutdown().await; break; }
                 }
             }
+        });
+        
+        // Relay data: upstream -> client
+        let mut buf = vec![0u8; 16384];
+        loop {
+            match prd.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => { if wr.write_all(&buf[..n]).await.is_err() { break; } }
+                Err(_) => break,
+            }
         }
-    });
+        let _ = wr.shutdown().await;
+        up_client.abort();
+    } else {
+        // Direct connection through netstack
+        let ip = match resolve(&stack, target).await {
+            Ok(ip) => ip,
+            Err(e) => {
+                let _ = reply(&mut sock, REP_GENERAL).await;
+                return Err(e);
+            }
+        };
 
-    while let Some(chunk) = from_stack.recv().await {
-        if wr.write_all(&chunk).await.is_err() {
-            break;
+        let dst = SocketAddr::new(ip, port);
+        let conn = match stack.open_tcp(dst).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = reply(&mut sock, REP_GENERAL).await;
+                return Err(e);
+            }
+        };
+
+        reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+
+        let (sender, mut from_stack) = conn.into_split();
+        let (mut rd, mut wr) = sock.into_split();
+
+        let up = tokio::spawn(async move {
+            let mut buf = vec![0u8; 16384];
+            loop {
+                match rd.read(&mut buf).await {
+                    Ok(0) => { sender.close().await; break; }
+                    Ok(n) => { if sender.send(buf[..n].to_vec()).await.is_err() { break; } }
+                    Err(_) => { sender.close().await; break; }
+                }
+            }
+        });
+
+        while let Some(chunk) = from_stack.recv().await {
+            if wr.write_all(&chunk).await.is_err() {
+                break;
+            }
         }
+
+        let _ = wr.shutdown().await;
+        up.abort();
+        Ok(())
     }
-
-    let _ = wr.shutdown().await;
-    up.abort();
-    Ok(())
 }
 
 async fn handle_udp_associate(mut sock: TcpStream, stack: StackHandle, bind_ip: IpAddr) -> Result<()> {
@@ -297,96 +361,55 @@ async fn handle_udp_associate(mut sock: TcpStream, stack: StackHandle, bind_ip: 
             r = relay.recv_from(&mut cbuf) => {
                 let (n, from) = match r { Ok(v) => v, Err(_) => break };
                 client = Some(from);
-                if let Some((dst, payload)) = parse_udp_request(&cbuf[..n]) {
-                    let dst = match dst {
-                        Target::Ip(ip) => SocketAddr::new(ip, payload.0),
-                        Target::Domain(name) => {
-                            match dns_resolve(&stack, &name).await {
-                                Ok(ip) => SocketAddr::new(ip, payload.0),
-                                Err(_) => continue,
-                            }
-                        }
-                    };
-                    let _ = sender.send_to(dst, payload.1).await;
-                }
-            }
 
-            maybe = from_stack.recv() => {
-                let (src, data) = match maybe { Some(v) => v, None => break };
-                if let Some(c) = client {
-                    let pkt = build_udp_reply(src, &data);
-                    let _ = relay.send_to(&pkt, c).await;
+                // Build SOCKS5 UDP request header
+                let atyp = if from.ip().is_ipv4() { ATYP_V4 } else { ATYP_V6 };
+                let mut pkt = vec![0x00, 0x00, 0x00, atyp];
+                match from.ip() {
+                    IpAddr::V4(v4) => pkt.extend_from_slice(&v4.octets()),
+                    IpAddr::V6(v6) => pkt.extend_from_slice(&v6.octets()),
                 }
-            }
+                pkt.extend_from_slice(&from.port().to_be_bytes());
+                pkt.extend_from_slice(&cbuf[..n]);
 
-            r = sock.read(&mut ctrl) => {
-                match r { Ok(0) | Err(_) => break, Ok(_) => {} }
+                if sender.send(pkt).await.is_err() { break; }
+            }
+            r = from_stack.recv() => {
+                let chunk = match r { Some(c) => c, None => break };
+                if chunk.len() < 10 { continue; }
+                let atyp = chunk[3];
+                let addr_start = 4;
+                let addr_len = match atyp {
+                    ATYP_V4 => 4,
+                    ATYP_V6 => 16,
+                    ATYP_DOMAIN => {
+                        if chunk.len() < 5 { continue; }
+                        chunk[4] as usize
+                    }
+                    _ => continue,
+                };
+                let header_len = addr_start + addr_len + 2;
+                if chunk.len() < header_len { continue; }
+                let port = u16::from_be_bytes([chunk[header_len - 2], chunk[header_len - 1]]);
+                let dest = match atyp {
+                    ATYP_V4 => {
+                        let mut b = [0u8; 4];
+                        b.copy_from_slice(&chunk[addr_start..addr_start + 4]);
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::from(b)), port)
+                    }
+                    ATYP_V6 => {
+                        let mut b = [0u8; 16];
+                        b.copy_from_slice(&chunk[addr_start..addr_start + 16]);
+                        SocketAddr::new(IpAddr::V6(b.into()), port)
+                    }
+                    ATYP_DOMAIN => continue, // skip domain for now
+                    _ => continue,
+                };
+                if let Some(client_addr) = client {
+                    let _ = relay.send_to(&chunk[header_len..], dest).await;
+                }
             }
         }
     }
-
-    sender.close().await;
     Ok(())
-}
-
-fn parse_udp_request(buf: &[u8]) -> Option<(Target, (u16, Vec<u8>))> {
-    if buf.len() < 4 || buf[2] != 0 {
-        return None;
-    }
-    let atyp = buf[3];
-    let mut pos = 4;
-    let target = match atyp {
-        ATYP_V4 => {
-            if buf.len() < pos + 4 {
-                return None;
-            }
-            let ip = Ipv4Addr::new(buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]);
-            pos += 4;
-            Target::Ip(IpAddr::V4(ip))
-        }
-        ATYP_V6 => {
-            if buf.len() < pos + 16 {
-                return None;
-            }
-            let mut b = [0u8; 16];
-            b.copy_from_slice(&buf[pos..pos + 16]);
-            pos += 16;
-            Target::Ip(IpAddr::V6(b.into()))
-        }
-        ATYP_DOMAIN => {
-            let len = *buf.get(pos)? as usize;
-            pos += 1;
-            if buf.len() < pos + len {
-                return None;
-            }
-            let name = String::from_utf8_lossy(&buf[pos..pos + len]).to_string();
-            pos += len;
-            Target::Domain(name)
-        }
-        _ => return None,
-    };
-
-    if buf.len() < pos + 2 {
-        return None;
-    }
-    let port = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
-    pos += 2;
-    Some((target, (port, buf[pos..].to_vec())))
-}
-
-fn build_udp_reply(src: SocketAddr, data: &[u8]) -> Vec<u8> {
-    let mut pkt = vec![0x00, 0x00, 0x00];
-    match src.ip() {
-        IpAddr::V4(v4) => {
-            pkt.push(ATYP_V4);
-            pkt.extend_from_slice(&v4.octets());
-        }
-        IpAddr::V6(v6) => {
-            pkt.push(ATYP_V6);
-            pkt.extend_from_slice(&v6.octets());
-        }
-    }
-    pkt.extend_from_slice(&src.port().to_be_bytes());
-    pkt.extend_from_slice(data);
-    pkt
 }
