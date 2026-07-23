@@ -237,7 +237,17 @@ async fn handle_connect(
                 return Err(AetherError::Other(format!("upstream connect failed: {e}")));
             }
         };
-        // Send SOCKS5 CONNECT to upstream for the target
+        // SOCKS5 greeting: version 5, 1 method, no auth
+        if proxy.write_all(&[VER, 0x01, 0x00]).await.is_err() {
+            let _ = reply(&mut sock, REP_GENERAL).await;
+            return Err(AetherError::Other("upstream greeting write failed".into()));
+        }
+        let mut greeting_resp = [0u8; 2];
+        if proxy.read_exact(&mut greeting_resp).await.is_err() || greeting_resp[0] != VER || greeting_resp[1] != 0x00 {
+            let _ = reply(&mut sock, REP_GENERAL).await;
+            return Err(AetherError::Other("upstream greeting rejected".into()));
+        }
+        // Send SOCKS5 CONNECT request for the target
         let connect_pkt = match &target {
             Target::Ip(IpAddr::V4(v4)) => {
                 let mut pkt = vec![VER, CMD_CONNECT, 0x00, ATYP_V4];

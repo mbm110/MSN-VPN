@@ -194,27 +194,37 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
     private fun fetchPublicIpBg() {
         try {
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort))
-            val ip = socksGet("https://api.ipify.org?format=json", proxy)?.let { json ->
+            val ip = socksGet("https://api.ipify.org?format=json", proxy)
+            log("IP raw: ${ip?.take(100) ?: "null"}")
+            val parsedIp = ip?.let { json ->
                 try { JSONObject(json).optString("ip", "") } catch (_: Exception) { "" }
             }?.ifEmpty { null }
-            val country = if (ip != null) {
-                val cResp = socksGet("https://ip-api.com/json/$ip?fields=countryCode", proxy)
-                log("Country API response: ${cResp?.take(100) ?: "null"}")
+
+            val country = if (parsedIp != null) {
+                val cResp = socksGet("http://ip-api.com/json/$parsedIp?fields=countryCode", proxy)
+                log("Country raw: ${cResp?.take(100) ?: "null"}")
                 cResp?.let { json ->
-                    try { JSONObject(json).optString("countryCode", "") } catch (_: Exception) { "" }
+                    try {
+                        val obj = JSONObject(json)
+                        obj.optString("countryCode", "")
+                    } catch (_: Exception) { "" }
                 }?.ifEmpty { null }
             } else null
             sendBroadcast(Intent(ACTION_IP_RESULT).apply {
-                putExtra(EXTRA_IP, ip ?: ""); putExtra(EXTRA_COUNTRY, country ?: "")
+                putExtra(EXTRA_IP, parsedIp ?: ""); putExtra(EXTRA_COUNTRY, country ?: "")
                 `package` = packageName
             })
-            log("IP fetch: ${ip ?: "?"} / ${country ?: "?"}")
+            log("IP fetch: ${parsedIp ?: "?"} / ${country ?: "?"}")
         } catch (e: Exception) { log("IP fetch failed: ${e.message}") }
     }
 
     private fun socksGet(url: String, proxy: Proxy): String? {
-        return try { URL(url).openConnection(proxy).let { (it as HttpURLConnection).apply { connectTimeout = 8000; readTimeout = 8000 }; it.inputStream.bufferedReader().use { it.readText() } }
-        } catch (e: Exception) { Log.v(TAG, "socksGet failed: $url $e"); null }
+        return try {
+            val conn = URL(url).openConnection(proxy)
+            conn.connectTimeout = 8000
+            (conn as java.net.HttpURLConnection).apply { connectTimeout = 8000; readTimeout = 8000 }
+            conn.inputStream.bufferedReader().use { it.readText() }
+        } catch (e: Exception) { log("socksGet fail: ${e.message}"); null }
     }
 
     // ── Config JSON ────────────────────────────────────────────

@@ -2202,8 +2202,13 @@ class MainActivity : Activity() {
     private fun psiphonProxyPort(): Int = socksPort() + 1000
 
     private fun renderStatus() {
-        val psiphonRunning = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("psiphon_running", false)
-        if (psiphonRunning) return // Psiphon proxy mode: state managed by PsiphonVpnService broadcasts
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val psiphonRunning = prefs.getBoolean("psiphon_running", false)
+        if (psiphonRunning && prefs.getBoolean("vpn_connected", false)) {
+            // Restore Psiphon connected state from service
+            if (visualState != ConnectionControl.State.CONNECTED) showConnected()
+            return
+        }
         if (!NativeCore.isRunning() && visualState == ConnectionControl.State.CONNECTED) showDisconnected()
     }
 
