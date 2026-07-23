@@ -131,6 +131,11 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         sessionStartMs = SystemClock.elapsedRealtime()
         prefs().edit().putBoolean("vpn_connected", true).putLong("session_start", sessionStartMs).apply()
         startTrafficWatcher()
+        // Broadcast connected state to MainActivity
+        sendBroadcast(Intent(AetherVpnService.ACTION_STATUS).apply {
+            putExtra(AetherVpnService.EXTRA_STATUS, AetherVpnService.STATUS_CONNECTED)
+            `package` = packageName
+        })
         // Fetch IP through SOCKS proxy for flag display
         bg.submit { Thread.sleep(2000); fetchPublicIpBg() }
     }

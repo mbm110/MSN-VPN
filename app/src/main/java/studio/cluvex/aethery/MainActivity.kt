@@ -376,7 +376,7 @@ class MainActivity : Activity() {
 
     private fun httpGet(url: String, useSocks: Boolean = false): String? = runCatching {
         val conn = if (useSocks) {
-            URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))) as HttpURLConnection
+            URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort()))) as HttpURLConnection
         } else {
             URL(url).openConnection() as HttpURLConnection
         }
@@ -2205,7 +2205,7 @@ class MainActivity : Activity() {
     }
 
     private fun showScanning() {
-        showConnectionProgress("Scanning", "Finding the best MASQUE gateway")
+        showConnectionProgress("Scanning", "Finding the best ${selectedProtocol.label} gateway")
     }
 
     private fun showConnectionProgress(title: String, detail: String) {
