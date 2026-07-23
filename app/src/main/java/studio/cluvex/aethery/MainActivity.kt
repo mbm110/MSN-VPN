@@ -44,6 +44,8 @@ import android.widget.TextView
 import com.google.android.material.color.DynamicColors
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.URL
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -343,13 +345,14 @@ class MainActivity : Activity() {
 
     private fun fetchPublicIp() {
         Thread {
-            // Step 1: get IPv4 (HTTPS, always IPv4)
-            val ip = httpGet("https://api.ipify.org?format=json")?.let { json ->
+            val psiphonActive = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("psiphon_running", false)
+            // Step 1: get IPv4 (use SOCKS proxy when Psiphon is active)
+            val ip = httpGet("https://api.ipify.org?format=json", useSocks = psiphonActive)?.let { json ->
                 Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
             }
-            // Step 2: get country code from ip-api.com (HTTPS)
+            // Step 2: get country code (same proxy preference)
             val country = if (ip != null) {
-                httpGet("https://ip-api.com/json/$ip?fields=countryCode")?.let { json ->
+                httpGet("https://ip-api.com/json/$ip?fields=countryCode", useSocks = psiphonActive)?.let { json ->
                     Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
                 }
             } else null
@@ -371,8 +374,12 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun httpGet(url: String): String? = runCatching {
-        val conn = URL(url).openConnection() as HttpURLConnection
+    private fun httpGet(url: String, useSocks: Boolean = false): String? = runCatching {
+        val conn = if (useSocks) {
+            URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", 10808))) as HttpURLConnection
+        } else {
+            URL(url).openConnection() as HttpURLConnection
+        }
         try {
             conn.connectTimeout = 8000
             conn.readTimeout = 8000
