@@ -98,7 +98,12 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     private fun cleanup() {
         stopTrafficWatcher(); tunnel = null; isRunning.set(false)
-        prefs().edit().putBoolean("vpn_connected", false).apply(); removeFg(); try { stopSelf() } catch (_: Throwable) {}
+        prefs().edit().putBoolean("vpn_connected", false).putBoolean("psiphon_running", false).apply()
+        sendBroadcast(Intent(AetherVpnService.ACTION_STATUS).apply {
+            putExtra(AetherVpnService.EXTRA_STATUS, AetherVpnService.STATUS_DISCONNECTED)
+            `package` = packageName
+        })
+        removeFg(); try { stopSelf() } catch (_: Throwable) {}
     }
 
     // ── Psiphon callbacks ──────────────────────────────────────

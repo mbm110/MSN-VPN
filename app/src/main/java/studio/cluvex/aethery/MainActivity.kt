@@ -131,12 +131,19 @@ class MainActivity : Activity() {
                         AetherVpnService.STATUS_FAILED -> showFailure(intent.getStringExtra(AetherVpnService.EXTRA_DETAIL))
                         AetherVpnService.STATUS_DISCONNECTED -> {
                             showDisconnected()
-                            getSharedPreferences("settings", MODE_PRIVATE).edit()
-                                .putBoolean("psiphon_running", false).apply()
+                            if (selectedProtocol == Protocol.PSIPHON) {
+                                getSharedPreferences("settings", MODE_PRIVATE).edit()
+                                    .putBoolean("psiphon_running", false).apply()
+                            }
                         }
                         "KILL_SWITCH_BLOCKED" -> connectionTimer.text = "Kill Switch: blocking traffic"
                         "FETCH_IP" -> fetchPublicIp()
                     }
+                }
+                PsiphonVpnService.ACTION_READY -> {
+                    // Psiphon SOCKS proxy is ready, now start AetherVpnService with upstream_proxy
+                    val config = configJson()
+                    startAetherVpn(config)
                 }
                 PsiphonVpnService.ACTION_IP_RESULT -> {
                     val ip = intent.getStringExtra(PsiphonVpnService.EXTRA_IP) ?: ""
@@ -245,6 +252,7 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         val filter = IntentFilter(AetherVpnService.ACTION_STATUS).apply {
+            addAction(PsiphonVpnService.ACTION_READY)
             addAction(PsiphonVpnService.ACTION_IP_RESULT)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
@@ -2156,18 +2164,23 @@ class MainActivity : Activity() {
 
     private fun connect(config: String) {
         showConnecting()
+        // For Psiphon VPN mode: wait for Psiphon to connect, THEN start AetherVpnService
+        if (selectedProtocol == Protocol.PSIPHON && connectionType() == ConnectionType.VPN) {
+            getSharedPreferences("settings", MODE_PRIVATE).edit()
+                .putBoolean("psiphon_running", true).apply()
+            startForegroundService(Intent(this, PsiphonVpnService::class.java)
+                .setAction(PsiphonVpnService.ACTION_CONNECT)
+                .putExtra(PsiphonVpnService.EXTRA_PORT, psiphonProxyPort()))
+            return // AetherVpnService starts when PSIPHON_READY is received
+        }
+        startAetherVpn(config)
+    }
+
+    private fun startAetherVpn(config: String) {
         val intent = Intent(this, AetherVpnService::class.java)
             .setAction(AetherVpnService.ACTION_CONNECT)
             .putExtra(AetherVpnService.EXTRA_CONFIG, config)
             .putExtra(AetherVpnService.EXTRA_VPN_MODE, connectionType() == ConnectionType.VPN)
-        if (selectedProtocol == Protocol.PSIPHON && connectionType() == ConnectionType.VPN) {
-            // Full tunnel via Psiphon proxy → Rust core → TUN
-            // upstream_proxy is in configJson()
-            // Start Psiphon proxy first, AetherVpnService waits for PSIPHON_READY
-            startForegroundService(Intent(this, PsiphonVpnService::class.java)
-                .setAction(PsiphonVpnService.ACTION_CONNECT)
-                .putExtra(PsiphonVpnService.EXTRA_PORT, if (connectionType() == ConnectionType.VPN) psiphonProxyPort() else socksPort()))
-        }
         startForegroundService(intent)
     }
 
