@@ -339,17 +339,6 @@ async fn handle_connect(
         Ok(())
     }
 }
-    while let Some(chunk) = from_stack.recv().await {
-        if wr.write_all(&chunk).await.is_err() {
-            break;
-        }
-    }
-
-    let _ = wr.shutdown().await;
-    up.abort();
-    Ok(())
-}
-
 async fn handle_udp_associate(mut sock: TcpStream, stack: StackHandle, bind_ip: IpAddr) -> Result<()> {
     let relay = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
     let relay_addr = relay.local_addr()?;
