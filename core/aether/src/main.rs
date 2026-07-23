@@ -463,6 +463,7 @@ async fn select_peer(
 }
 
 /// Resolves and caches ECH configuration for the tunnel endpoint.
+async fn resolve_ech() -> Option<Vec<u8>> {
     match std::env::var("AETHER_ECH") {
         Ok(v) if v.eq_ignore_ascii_case("auto") => match dns::fetch_ech_config().await {
             Ok(raw) => {
