@@ -235,19 +235,15 @@ pub async fn start(options: StartOptions) -> Result<()> {
             let upstream = options.upstream_proxy;
             let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
             let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
-            if let Some(fd) = tun_fd {
-                // TUN bridge reads from inbound_rx (to write to TUN) and sends TUN reads to outbound_tx
-                tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx));
-            } else {
-                // Without TUN, outbound_rx is consumed by the tunnel (unused in Psiphon proxy mode)
-                drop(outbound_rx);
-            }
-            // netstack reads from the TUN bridge's output (outbound_rx) and writes to TUN bridge's input (inbound_tx)
-            // When no TUN, the netstack's packets have nowhere to go, which is correct for proxy-only mode
-            let stack = if tun_fd.is_some() {
-                netstack::spawn("10.0.0.2", "fd00::2", TUNNEL_MTU, outbound_rx, inbound_tx)?
-            } else {
-                netstack::spawn("10.0.0.2", "fd00::2", TUNNEL_MTU, inbound_rx, outbound_tx)?
+            let stack = match tun_fd {
+                Some(fd) => {
+                    tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx));
+                    netstack::spawn("10.0.0.2", "fd00::2", TUNNEL_MTU, outbound_rx, inbound_tx)?
+                }
+                None => {
+                    drop(outbound_rx);
+                    netstack::spawn("10.0.0.2", "fd00::2", TUNNEL_MTU, inbound_rx, outbound_tx)?
+                }
             };
             log::info!("[+] PSIPHON SOCKS5 server on {listen} -> upstream {upstream:?}");
             socks::serve(listen, stack, upstream).await
@@ -654,6 +650,7 @@ async fn run_wireguard(
     let multi = candidates.len() > 1;
 
     let private_key = identity.private_key_bytes()?;
+    let proxy = options.upstream_proxy;
     let peer_public = identity.peer_public_key_bytes()?;
     let ipv4: std::net::Ipv4Addr = identity
         .ipv4
@@ -795,10 +792,9 @@ async fn run_wireguard_tunnel(
             inbound_rx,
             outbound_tx,
         )?;
-        let upstream_proxy = options.upstream_proxy;
         tokio::spawn(async move {
             log::info!("[+] socks5 server listening on {listen}");
-            socks::serve(listen, stack, upstream_proxy).await
+            socks::serve(listen, stack, proxy).await
         })
     };
 
@@ -1033,6 +1029,7 @@ impl Protocol {
             Protocol::Masque => "MASQUE",
             Protocol::WireGuard => "WireGuard",
             Protocol::WarpInWarp => "WARP-in-WARP (gool)",
+            Protocol::Psiphon => "Psiphon",
         }
     }
 }
