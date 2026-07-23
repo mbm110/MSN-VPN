@@ -32,6 +32,7 @@ pub struct StartOptions {
     pub masque_transport: MasqueTransport,
     pub tls_curve_preset: TlsCurvePreset,
     pub wireguard_data_check: bool,
+    pub upstream_proxy: Option<SocketAddr>,
     pub tun_fd: Option<i32>,
 }
 
@@ -236,7 +237,7 @@ pub async fn start(options: StartOptions) -> Result<()> {
                 log::info!("[+] Psiphon TUN bridge active");
                 tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx));
             }
-            let stack = netstack::spawn("10.0.0.2", "fd00::2", TUNNEL_MTU, inbound_tx, outbound_rx)?;
+            let stack = netstack::spawn("10.0.0.2", "fd00::2", TUNNEL_MTU, inbound_rx, outbound_tx)?;
             log::info!("[+] SOCKS5 server on {listen} -> upstream {upstream:?}");
             socks::serve(listen, stack, upstream).await
         }
@@ -1001,6 +1002,7 @@ pub enum Protocol {
     Masque,
     WireGuard,
     WarpInWarp,
+    Psiphon,
 }
 
 impl Protocol {
@@ -1008,6 +1010,7 @@ impl Protocol {
         match s.trim().to_lowercase().as_str() {
             "wg" | "wireguard" => Protocol::WireGuard,
             "gool" | "wiw" | "warp-in-warp" | "warpinwarp" => Protocol::WarpInWarp,
+            "psiphon" => Protocol::Psiphon,
             _ => Protocol::Masque,
         }
     }
