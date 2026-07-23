@@ -307,6 +307,9 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         dataDir.mkdirs()
         config.put("DataRootDirectory", dataDir.absolutePath)
 
+        // Disable signature verification (embedded entries don't have matching public key)
+        config.put("DisableRemoteServerListSignatureVerification", true)
+
         // Diagnostic logging
         config.put("EmitDiagnosticNotices", true)
         config.put("EmitDiagnosticNetworkParameters", true)
