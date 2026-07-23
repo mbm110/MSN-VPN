@@ -2206,6 +2206,8 @@ class MainActivity : Activity() {
     private fun psiphonProxyPort(): Int = socksPort() + 1000
 
     private fun renderStatus() {
+        val psiphonRunning = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("psiphon_running", false)
+        if (psiphonRunning) return // Psiphon proxy mode: state managed by PsiphonVpnService broadcasts
         if (!NativeCore.isRunning() && visualState == ConnectionControl.State.CONNECTED) showDisconnected()
     }
 
@@ -2245,7 +2247,8 @@ class MainActivity : Activity() {
         refreshUsageDisplay()
         setModeEnabled(false)
         pingConnection()
-        fetchPublicIp()
+        // Psiphon fetches IP itself through SOCKS; don't double-fetch
+        if (selectedProtocol != Protocol.PSIPHON) fetchPublicIp()
         startTimerUpdates()
     }
 

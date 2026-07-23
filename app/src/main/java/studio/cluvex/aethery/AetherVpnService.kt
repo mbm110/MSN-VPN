@@ -109,6 +109,7 @@ class AetherVpnService : VpnService() {
                         .applyBypassIran()
                         .establish() ?: error("Android could not establish the VPN interface")
                     NativeCore.attach(this)
+                    socketProtector = { fd -> protect(fd) }
                     ConnectionLog.record("Scanning gateways for VPN")
                     sendStatus(STATUS_SCANNING)
                     watchReadiness()
@@ -134,6 +135,7 @@ class AetherVpnService : VpnService() {
                 trafficCheck?.cancel(true)
                 trafficCheck = null
                 NativeCore.detach()
+                socketProtector = null
                 tun?.close()
                 tun = null
                 if (!reconnectScheduled) {
@@ -422,6 +424,10 @@ class AetherVpnService : VpnService() {
         private const val LOG_TAG = "MSN-VPNVpn"
         private const val MAX_RECONNECT_ATTEMPTS = 3
         private const val RECONNECT_DELAY_MS = 3000L
+
+        /** Called by PsiphonVpnService to protect sockets from AetherVpnService's TUN */
+        @Volatile
+        var socketProtector: ((Int) -> Boolean)? = null
 
         val IRANIAN_PACKAGES = listOf(
             "ir.divar",

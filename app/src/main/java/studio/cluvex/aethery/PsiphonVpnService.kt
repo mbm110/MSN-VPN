@@ -30,7 +30,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import studio.cluvex.aethery.ConnectionLog
 
-class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
+class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
 
     companion object {
         const val ACTION_CONNECT = "studio.cluvex.aethery.psiphon.CONNECT"
@@ -74,7 +74,6 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() { bg.submit { forceStop() }; bg.shutdown(); scheduler.shutdown(); super.onDestroy() }
-    override fun onRevoke() { bg.submit { stopTunnel() } }
 
     private fun startTunnelBg() {
         try {
@@ -111,7 +110,10 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     override fun getContext(): Context = this
     override fun getPsiphonConfig(): String = buildConfig()
     override fun loadLibrary(name: String) { System.loadLibrary(name) }
-    override fun bindToDevice(fd: Long) { val ok = protect(fd.toInt()); if (!ok) throw RuntimeException("protect($fd) failed") }
+    override fun bindToDevice(fd: Long) {
+        val ok = AetherVpnService.socketProtector?.invoke(fd.toInt()) ?: true
+        if (!ok) throw RuntimeException("protect($fd) failed")
+    }
 
     override fun onDiagnosticMessage(message: String) {
         Log.i(TAG, "[Psiphon] $message"); ConnectionLog.record("[Psiphon] $message")
@@ -193,18 +195,18 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         try {
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort))
             val ip = socksGet("https://api.ipify.org?format=json", proxy)?.let { json ->
-                Regex("\"ip\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
+                try { JSONObject(json).optString("ip", null) } catch (_: Exception) { null }
             }
             val country = if (ip != null) {
                 socksGet("https://ip-api.com/json/$ip?fields=countryCode", proxy)?.let { json ->
-                    Regex("\"countryCode\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1)
+                    try { JSONObject(json).optString("countryCode", null) } catch (_: Exception) { null }
                 }
             } else null
             sendBroadcast(Intent(ACTION_IP_RESULT).apply {
                 putExtra(EXTRA_IP, ip ?: ""); putExtra(EXTRA_COUNTRY, country ?: "")
                 `package` = packageName
             })
-            log("IP fetch: $ip / $country")
+            log("IP fetch: ${ip ?: "?"} / ${country ?: "?"}")
         } catch (e: Exception) { log("IP fetch failed: ${e.message}") }
     }
 
