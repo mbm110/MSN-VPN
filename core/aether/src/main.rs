@@ -106,6 +106,7 @@ impl StartOptions {
             tls_curve_preset: TlsCurvePreset::Chrome,
             wireguard_data_check: true,
             tun_fd: None,
+            upstream_proxy: None,
         }
     }
 
@@ -136,10 +137,11 @@ pub async fn run_cli() -> Result<()> {
     };
 
     let forced_peer = match protocol {
-        Protocol::Masque => std::env::var("AETHER_PEER").ok(),
         Protocol::WireGuard | Protocol::WarpInWarp => std::env::var("AETHER_WG_PEER")
             .ok()
             .or_else(|| std::env::var("AETHER_PEER").ok()),
+        Protocol::Masque => std::env::var("AETHER_PEER").ok(),
+        Protocol::Psiphon => None,
     }
     .map(|peer| {
         peer.parse()
@@ -234,11 +236,20 @@ pub async fn start(options: StartOptions) -> Result<()> {
             let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
             let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
             if let Some(fd) = tun_fd {
-                log::info!("[+] Psiphon TUN bridge active");
+                // TUN bridge reads from inbound_rx (to write to TUN) and sends TUN reads to outbound_tx
                 tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx));
+            } else {
+                // Without TUN, outbound_rx is consumed by the tunnel (unused in Psiphon proxy mode)
+                drop(outbound_rx);
             }
-            let stack = netstack::spawn("10.0.0.2", "fd00::2", TUNNEL_MTU, inbound_rx, outbound_tx)?;
-            log::info!("[+] SOCKS5 server on {listen} -> upstream {upstream:?}");
+            // netstack reads from the TUN bridge's output (outbound_rx) and writes to TUN bridge's input (inbound_tx)
+            // When no TUN, the netstack's packets have nowhere to go, which is correct for proxy-only mode
+            let stack = if tun_fd.is_some() {
+                netstack::spawn("10.0.0.2", "fd00::2", TUNNEL_MTU, outbound_rx, inbound_tx)?
+            } else {
+                netstack::spawn("10.0.0.2", "fd00::2", TUNNEL_MTU, inbound_rx, outbound_tx)?
+            };
+            log::info!("[+] PSIPHON SOCKS5 server on {listen} -> upstream {upstream:?}");
             socks::serve(listen, stack, upstream).await
         }
     }
@@ -447,10 +458,11 @@ async fn select_peer(
             log::info!("[+] selected WireGuard endpoint {}:{} (rtt {:?})", best.ip, best.port, best.rtt);
             Ok(SocketAddr::new(best.ip, best.port))
         }
+        Protocol::Psiphon => unreachable!("select_peer should not be called for Psiphon"),
     }
 }
 
-async fn resolve_ech() -> Option<Vec<u8>> {
+/// Resolves and caches ECH configuration for the tunnel endpoint.
     match std::env::var("AETHER_ECH") {
         Ok(v) if v.eq_ignore_ascii_case("auto") => match dns::fetch_ech_config().await {
             Ok(raw) => {
