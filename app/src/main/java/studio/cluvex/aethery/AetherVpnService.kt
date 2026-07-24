@@ -22,49 +22,56 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * Clean VPN architecture:
+ * - Psiphon is ALWAYS excluded from the TUN (addDisallowedApplication).
+ *   Psiphon runs as a background Service (not VpnService) and connects
+ *   directly to the Internet. Its SOCKS proxy is then used as upstream
+ *   for device traffic going through the TUN.
+ * - socketProtector is set BEFORE establish() so all subsequent sockets
+ *   (Rust core's outbound) are properly protected.
+ * - Unified state via VpnState object (no more scattered broadcasts).
+ * - Psiphon + AetherVpnService start simultaneously; Rust core waits for
+ *   the SOCKS port to become available.
+ */
 class AetherVpnService : VpnService() {
+
+    // ── Thread pools ──────────────────────────────────────────────
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
-    private val readinessWorker = Executors.newSingleThreadScheduledExecutor()
+    private val scheduler = Executors.newSingleThreadScheduledExecutor()
+
+    // ── State ─────────────────────────────────────────────────────
     private val connected = AtomicBoolean(false)
     private val stopRequested = AtomicBoolean(false)
-    private val userInitiatedDisconnect = AtomicBoolean(false)
+    private val userDisconnect = AtomicBoolean(false)
     private var tun: ParcelFileDescriptor? = null
-    private var readinessCheck: ScheduledFuture<*>? = null
-    private var trafficCheck: ScheduledFuture<*>? = null
-    private var lastRxBytes = 0L
-    private var lastTxBytes = 0L
-    private var lastTrafficSampleMs = 0L
-    private var sessionRxBytes = 0L
-    private var sessionTxBytes = 0L
-    private var sessionStartMs = 0L
-    private var reconnectScheduled = false
-    private var reconnectAttempt = 0
+    private var trafficJob: ScheduledFuture<*>? = null
+    private var sessionRx = 0L
+    private var sessionTx = 0L
     private val reconnectHandler = Handler(Looper.getMainLooper())
+    private var reconnectAttempt = 0
 
-    override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> {
                 reconnectAttempt = 0
-                reconnectScheduled = false
-                sessionStartMs = SystemClock.elapsedRealtime()
-                sessionRxBytes = 0
-                sessionTxBytes = 0
-                // Save session start time and config
-                getSharedPreferences("settings", MODE_PRIVATE).edit()
-                    .putLong("session_start", sessionStartMs)
-                    .putString("saved_config", intent.getStringExtra(EXTRA_CONFIG))
-                    .putBoolean("saved_vpn_mode", intent.getBooleanExtra(EXTRA_VPN_MODE, true))
+                sessionRx = 0
+                sessionTx = 0
+                val config = intent.getStringExtra(EXTRA_CONFIG) ?: return START_NOT_STICKY
+                val vpnMode = intent.getBooleanExtra(EXTRA_VPN_MODE, true)
+                val savedMode = getSharedPreferences("settings", MODE_PRIVATE)
+                savedMode.edit()
+                    .putString("saved_config", config)
+                    .putBoolean("saved_vpn_mode", vpnMode)
+                    .putLong("session_start", SystemClock.elapsedRealtime())
                     .apply()
-                startTunnel(intent.getStringExtra(EXTRA_CONFIG) ?: return START_NOT_STICKY,
-                    intent.getBooleanExtra(EXTRA_VPN_MODE, true))
+                startTunnel(config, vpnMode)
             }
             ACTION_DISCONNECT -> {
-                userInitiatedDisconnect.set(true)
+                userDisconnect.set(true)
                 reconnectHandler.removeCallbacksAndMessages(null)
-                reconnectAttempt = 0
-                reconnectScheduled = false
                 stopTunnel()
             }
         }
@@ -72,78 +79,98 @@ class AetherVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        userInitiatedDisconnect.set(true)
+        userDisconnect.set(true)
         reconnectHandler.removeCallbacksAndMessages(null)
         stopTunnel(notify = false)
         worker.shutdownNow()
-        readinessWorker.shutdownNow()
+        scheduler.shutdownNow()
         super.onDestroy()
     }
 
+    // Called by the Rust JNI layer to protect sockets
     fun protectSocket(fd: Int): Boolean = protect(fd)
+
+    // ── Core tunnel logic ───────────────────────────────────────────
 
     private fun startTunnel(config: String, vpnMode: Boolean) {
         if (!connected.compareAndSet(false, true)) return
         stopRequested.set(false)
-        reconnectScheduled = false
-        startAsForeground()
-        if (vpnMode) watchTraffic()
-        sendStatus(STATUS_STARTING)
+        VpnState.setConnecting()
+
+        startForegroundCompat()
+        if (vpnMode) startTrafficWatch()
+
         worker.execute {
             try {
-                val protocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
+                val protocol = parseProtocol(config)
                 ConnectionLog.record("Preparing $protocol identity")
-                val result = if (vpnMode) {
-                    val addresses = NativeCore.prepare(config)
-                    ConnectionLog.record("Creating Android VPN interface")
-                    tun = Builder()
-                        .setSession("MSN-VPN")
-                        .setMtu(1280)
-                        .addAddress(addresses.ipv4, 32)
-                        .addAddress(addresses.ipv6, 128)
-                        .addRoute("0.0.0.0", 0)
-                        .addRoute("::", 0)
-                        .addDnsServer(dnsServer())
-                        .applySplitTunneling()
-                        .apply { if (!killSwitchEnabled()) allowBypass() }
-                        .applyBypassIran()
-                        .establish() ?: error("Android could not establish the VPN interface")
+
+                if (!vpnMode) {
+                    ConnectionLog.record("Starting SOCKS proxy mode")
                     NativeCore.attach(this)
                     socketProtector = { fd -> protect(fd) }
-                    ConnectionLog.record("Scanning gateways for VPN")
-                    sendStatus(STATUS_SCANNING)
-                    watchReadiness()
-                    // Wait for upstream SOCKS proxy (Psiphon) before starting Rust core
-                    waitForUpstreamProxy(config)
-                    NativeCore.start(config, tun!!.fd)
-                } else {
-                    ConnectionLog.record("Starting local SOCKS5 proxy")
-                    sendStatus(STATUS_SCANNING)
-                    watchReadiness()
                     NativeCore.startProxy(config)
+                    watchReady()
+                    return@execute
                 }
-                check(result == 0) { NativeCore.lastError() }
-                check(stopRequested.get()) {
-                    NativeCore.lastError().ifBlank { "Tunnel closed before setup completed" }
-                }
-                sendStatus(STATUS_DISCONNECTED)
+
+                // VPN mode: build TUN with Psiphon EXCLUDED
+                val addresses = NativeCore.prepare(config)
+                ConnectionLog.record("Creating Android VPN interface")
+
+                tun = Builder()
+                    .setSession("MSN-VPN")
+                    .setMtu(1280)
+                    .addAddress(addresses.ipv4, 32)
+                    .addAddress(addresses.ipv6, 128)
+                    .addRoute("0.0.0.0", 0)
+                    .addRoute("::", 0)
+                    .addDnsServer(dnsServer())
+                    // CRITICAL: exclude this app so Psiphon bypasses the TUN
+                    // and reaches the Internet directly (no routing loop)
+                    .also { builder ->
+                        try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
+                    }
+                    .applySplitTunneling()
+                    .apply { if (!killSwitchEnabled()) allowBypass() }
+                    .applyBypassIran()
+                    .establish() ?: error("Android could not establish the VPN interface")
+
+                // Set socketProtector BEFORE NativeCore.start() so ALL Rust sockets
+                // (including any DNS/control connections) are protected from the TUN
+                NativeCore.attach(this)
+                socketProtector = { fd -> protect(fd) }
+
+                ConnectionLog.record("Scanning gateways for VPN")
+                watchReady()
+
+                // Wait for upstream SOCKS proxy (Psiphon) before starting Rust core
+                waitForUpstreamProxy(config)
+
+                NativeCore.start(config, tun!!.fd)
+
+                check(NativeCore.isReady()) { NativeCore.lastError() }
+                check(!stopRequested.get()) { "Tunnel stopped before setup completed" }
+
+                VpnState.setDisconnected()
             } catch (error: Exception) {
                 val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
                 Log.e(LOG_TAG, "Tunnel failed: $detail", error)
-                sendStatus(STATUS_FAILED, detail)
+                ConnectionLog.record("FAILED: $detail")
+                VpnState.setFailed(detail)
+                broadcastStatus(VpnState.status, detail)
             } finally {
-                readinessCheck?.cancel(true)
-                readinessCheck = null
-                trafficCheck?.cancel(true)
-                trafficCheck = null
+                trafficJob?.cancel(true)
+                trafficJob = null
                 NativeCore.detach()
                 socketProtector = null
-                tun?.close()
-                tun = null
-                if (!reconnectScheduled) {
+
+                if (!handleReconnect()) {
+                    tun?.close()
+                    tun = null
                     connected.set(false)
-                    getSharedPreferences("settings", MODE_PRIVATE).edit()
-                        .putBoolean("vpn_connected", false).apply()
+                    VpnState.setDisconnected()
+                    broadcastStatus(VpnState.status)
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
@@ -153,84 +180,54 @@ class AetherVpnService : VpnService() {
 
     private fun stopTunnel(notify: Boolean = true) {
         stopRequested.set(true)
-        readinessCheck?.cancel(true)
-        readinessCheck = null
-        trafficCheck?.cancel(true)
-        trafficCheck = null
+        trafficJob?.cancel(true)
+        trafficJob = null
         NativeCore.stop()
-        getSharedPreferences("settings", MODE_PRIVATE).edit()
-            .putLong("session_start", 0L).apply()
-        saveSessionDataUsage()
+        VpnState.setDisconnected()
+        if (notify) broadcastStatus(VpnState.status)
 
-        // Auto Reconnect: first priority when enabled and not user-initiated
-        if (autoReconnectEnabled() && !userInitiatedDisconnect.get() && reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
-            reconnectAttempt++
-            reconnectScheduled = true
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putBoolean("vpn_connected", false)
+            .putLong("session_start", 0)
+            .apply()
+
+        if (!handleReconnect()) {
             tun?.close()
             tun = null
-            if (notify) sendStatus(STATUS_DISCONNECTED, "Reconnecting in 3s ($reconnectAttempt/$MAX_RECONNECT_ATTEMPTS)")
-            scheduleReconnect()
-            return
+            connected.set(false)
+            reconnectAttempt = 0
         }
-
-        // Kill Switch: block traffic when reconnect is off or exhausted
-        if (killSwitchEnabled() && !userInitiatedDisconnect.get()) {
-            activateKillSwitchBlackhole()
-            if (notify) sendStatus(STATUS_DISCONNECTED)
-            return
-        }
-        reconnectAttempt = 0
-        reconnectScheduled = false
-
-        tun?.close()
-        tun = null
-        getSharedPreferences("settings", MODE_PRIVATE).edit()
-            .putBoolean("vpn_connected", false).apply()
-        if (notify) sendStatus(STATUS_DISCONNECTED)
     }
 
-    private fun waitForUpstreamProxy(config: String) {
-        try {
-            val json = org.json.JSONObject(config)
-            val proxy = json.optString("upstream_proxy", "")
-            if (proxy.isEmpty()) return // No upstream proxy needed
-            val port = proxy.substringAfterLast(":").toIntOrNull() ?: return
-            ConnectionLog.record("Waiting for upstream SOCKS proxy on :$port...")
-            val deadline = System.currentTimeMillis() + 30_000L
-            while (System.currentTimeMillis() < deadline) {
-                try {
-                    java.net.Socket("127.0.0.1", port).use { 
-                        ConnectionLog.record("Upstream SOCKS proxy ready on :$port")
-                        return 
+    /** Returns true if reconnect was scheduled, false if done */
+    private fun handleReconnect(): Boolean {
+        if (userDisconnect.get()) return false
+        if (killSwitchEnabled() && reconnectAttempt >= MAX_RECONNECT) {
+            activateKillSwitch()
+            return true
+        }
+        if (reconnectAttempt < MAX_RECONNECT) {
+            reconnectAttempt++
+            reconnectHandler.postDelayed({
+                if (!stopRequested.get()) {
+                    reconnectAttempt = 0
+                    worker.execute {
+                        connected.set(false)
+                        userDisconnect.set(false)
+                        val savedConfig = getSharedPreferences("settings", MODE_PRIVATE)
+                            .getString("saved_config", null) ?: return@execute
+                        startTunnel(savedConfig,
+                            getSharedPreferences("settings", MODE_PRIVATE)
+                                .getBoolean("saved_vpn_mode", true))
                     }
-                } catch (_: Exception) {
-                    Thread.sleep(500)
                 }
-            }
-            ConnectionLog.record("Warning: upstream proxy not ready after 30s, proceeding anyway")
-        } catch (_: Exception) {}
+            }, RECONNECT_DELAY_MS)
+            return true
+        }
+        return false
     }
 
-    private fun scheduleReconnect() {
-        reconnectHandler.postDelayed({
-            if (!stopRequested.get()) {
-                val savedConfig = getSharedPreferences("settings", MODE_PRIVATE)
-                    .getString("saved_config", null)
-                if (savedConfig != null) {
-                    connected.set(false)
-                    userInitiatedDisconnect.set(false)
-                    // Re-start the tunnel from the same process (don't use ACTION_CONNECT intent)
-                    sessionStartMs = SystemClock.elapsedRealtime()
-                    getSharedPreferences("settings", MODE_PRIVATE).edit()
-                        .putLong("session_start", sessionStartMs).apply()
-                    startTunnel(savedConfig, getSharedPreferences("settings", MODE_PRIVATE)
-                        .getBoolean("saved_vpn_mode", true))
-                }
-            }
-        }, RECONNECT_DELAY_MS)
-    }
-
-    private fun activateKillSwitchBlackhole() {
+    private fun activateKillSwitch() {
         try {
             tun?.close()
             tun = Builder()
@@ -242,134 +239,145 @@ class AetherVpnService : VpnService() {
                 .addDnsServer("192.0.2.1")
                 .allowBypass()
                 .establish()
-            ConnectionLog.record("Kill Switch: unexpected disconnect, blocking all traffic")
-            sendStatus("KILL_SWITCH_BLOCKED")
+            ConnectionLog.record("Kill Switch: blocking all traffic")
         } catch (e: Exception) {
-            Log.e(LOG_TAG, "Kill Switch blackhole failed: ${e.message}", e)
+            Log.e(LOG_TAG, "Kill Switch failed: ${e.message}", e)
             tun?.close()
             tun = null
         }
     }
 
-    private fun killSwitchEnabled(): Boolean =
-        getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
+    // ── Wait for Psiphon SOCKS port ────────────────────────────────
 
-    private fun autoReconnectEnabled(): Boolean =
-        getSharedPreferences("settings", MODE_PRIVATE).getBoolean("auto_reconnect", true)
+    private fun waitForUpstreamProxy(config: String) {
+        val proxy = runCatching {
+            org.json.JSONObject(config).optString("upstream_proxy", "")
+        }.getOrNull() ?: return
+        if (proxy.isEmpty()) return
 
-    private fun adBlockerEnabled(): Boolean =
-        getSharedPreferences("settings", MODE_PRIVATE).getBoolean("ad_blocker", false)
+        val port = proxy.substringAfterLast(":").toIntOrNull() ?: return
+        ConnectionLog.record("Waiting for Psiphon SOCKS on :$port...")
 
-    private fun bypassIranEnabled(): Boolean =
-        getSharedPreferences("settings", MODE_PRIVATE).getBoolean("bypass_iran", false)
-
-    private fun dnsServer(): String =
-        if (adBlockerEnabled()) "94.140.14.14" else "1.1.1.1"
-
-    private fun Builder.applyBypassIran(): Builder {
-        if (!bypassIranEnabled()) return this
-        IRANIAN_PACKAGES.forEach { pkg ->
-            try { addDisallowedApplication(pkg) } catch (_: Exception) { }
-        }
-        ConnectionLog.record("Bypass Iran: ${IRANIAN_PACKAGES.size} app(s) bypass VPN")
-        return this
-    }
-
-    private fun saveSessionDataUsage() {
-        // Data already saved continuously in watchTraffic — no-op
-    }
-
-    private fun currentRxBytes(): Long = trafficBytes(TrafficStats.getUidRxBytes(applicationInfo.uid))
-    private fun currentTxBytes(): Long = trafficBytes(TrafficStats.getUidTxBytes(applicationInfo.uid))
-
-    private fun sendStatus(status: String, detail: String? = null) {
-        Log.i(LOG_TAG, "status=$status${detail?.let { " detail=$it" } ?: ""}")
-        ConnectionLog.record("${status.replaceFirstChar(Char::uppercase)}${detail?.let { ": $it" } ?: ""}")
-
-        // Update vpn_connected flag for Quick Settings Tile
-        if (status == STATUS_CONNECTED) {
-            getSharedPreferences("settings", MODE_PRIVATE).edit()
-                .putBoolean("vpn_connected", true).apply()
-        } else if (status == STATUS_DISCONNECTED || status == STATUS_FAILED) {
-            getSharedPreferences("settings", MODE_PRIVATE).edit()
-                .putBoolean("vpn_connected", false).apply()
-        }
-
-        sendBroadcast(Intent(ACTION_STATUS)
-            .setPackage(packageName)
-            .putExtra(EXTRA_STATUS, status)
-            .apply { detail?.let { putExtra(EXTRA_DETAIL, it) } }
-            .apply { putExtra(EXTRA_ELAPSED, (SystemClock.elapsedRealtime() - sessionStartMs) / 1000) })
-    }
-
-    private fun watchReadiness() {
-        readinessCheck?.cancel(true)
-        readinessCheck = readinessWorker.scheduleAtFixedRate({
-            if (NativeCore.isReady()) {
-                ConnectionLog.record("CONNECT-IP accepted by gateway")
-                sendStatus(STATUS_CONNECTED)
-                readinessCheck?.cancel(false)
+        val deadline = System.currentTimeMillis() + 30_000L
+        while (System.currentTimeMillis() < deadline) {
+            if (stopRequested.get()) return
+            try {
+                java.net.Socket("127.0.0.1", port).use {
+                    ConnectionLog.record("Psiphon SOCKS ready on :$port")
+                    return
+                }
+            } catch (_: Exception) {
+                Thread.sleep(500)
             }
-        }, 250, 250, TimeUnit.MILLISECONDS)
+        }
+        ConnectionLog.record("Warning: Psiphon SOCKS not ready after 30s, proceeding anyway")
     }
 
-    private fun startAsForeground() {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(
-            CHANNEL_ID,
-            getString(R.string.vpn_channel_name),
-            NotificationManager.IMPORTANCE_LOW,
-        ))
-        val notification = notification(getString(R.string.vpn_notification))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+    // ── Ready watcher ─────────────────────────────────────────────
+
+    private fun watchReady() {
+        scheduler.execute {
+            while (!stopRequested.get() && !NativeCore.isReady()) {
+                Thread.sleep(250)
+            }
+            if (stopRequested.get()) return@execute
+
+            ConnectionLog.record("Tunnel ready")
+            VpnState.setConnected("", "")
+            broadcastStatus(VpnState.status)
+            fetchIpAsync()
         }
     }
 
-    private fun watchTraffic() {
-        lastRxBytes = currentRxBytes()
-        lastTxBytes = currentTxBytes()
-        lastTrafficSampleMs = SystemClock.elapsedRealtime()
-        trafficCheck?.cancel(true)
-        trafficCheck = readinessWorker.scheduleAtFixedRate({
-            val now = SystemClock.elapsedRealtime()
-            val elapsedMs = (now - lastTrafficSampleMs).coerceAtLeast(1L)
+    private fun fetchIpAsync() {
+        scheduler.execute {
+            val ipFetcher = IpFetcher()
+            val result = ipFetcher.fetch()
+            VpnState.ip = result.ip
+            VpnState.countryCode = result.countryCode
+            broadcastIpResult(result.ip, result.countryCode)
+        }
+    }
+
+    // ── Traffic monitoring ─────────────────────────────────────────
+
+    private fun startTrafficWatch() {
+        trafficJob = scheduler.scheduleAtFixedRate({
+            val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+            val startMs = prefs.getLong("session_start", 0)
+            if (startMs == 0L) return@scheduleAtFixedRate
+
             val rx = currentRxBytes()
             val tx = currentTxBytes()
-            val rxDelta = (rx - lastRxBytes).coerceAtLeast(0L)
-            val txDelta = (tx - lastTxBytes).coerceAtLeast(0L)
-            val down = rxDelta * 1_000 / elapsedMs
-            val up = txDelta * 1_000 / elapsedMs
-            sessionRxBytes += rxDelta
-            sessionTxBytes += txDelta
-            lastRxBytes = rx
-            lastTxBytes = tx
-            lastTrafficSampleMs = now
-            // Save live data usage for main screen + cumulative (crash-safe)
-            val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-            val cumRx = prefs.getLong("total_rx", 0) + rxDelta
-            val cumTx = prefs.getLong("total_tx", 0) + txDelta
+            sessionRx += rx
+            sessionTx += tx
+            val timer = formatDuration((SystemClock.elapsedRealtime() - startMs) / 1000)
+
+            val liveRx = prefs.getLong("total_rx", 0) + rx
+            val liveTx = prefs.getLong("total_tx", 0) + tx
             prefs.edit()
-                .putLong("live_rx", cumRx)
-                .putLong("live_tx", cumTx)
-                .putLong("total_rx", cumRx)
-                .putLong("total_tx", cumTx)
+                .putLong("live_rx", liveRx)
+                .putLong("live_tx", liveTx)
+                .putLong("total_rx", liveRx)
+                .putLong("total_tx", liveTx)
                 .apply()
-            val timer = formatDuration((SystemClock.elapsedRealtime() - sessionStartMs) / 1000)
-            getSystemService(NotificationManager::class.java)
-                .notify(NOTIFICATION_ID, notification("↓ ${formatRate(down)}  ↑ ${formatRate(up)}  $timer"))
+
+            val content = "↓ ${formatRate(rx)}  ↑ ${formatRate(tx)}  $timer"
+            runCatching {
+                (getSystemService(NotificationManager::class.java) as NotificationManager)
+                    .notify(NOTIFICATION_ID, notification(content))
+            }
         }, 1, 1, TimeUnit.SECONDS)
     }
 
+    // ── Broadcast helpers ──────────────────────────────────────────
+
+    private fun broadcastStatus(status: VpnState.Status, detail: String = "") {
+        sendBroadcast(Intent(ACTION_STATUS)
+            .setPackage(packageName)
+            .putExtra(EXTRA_STATUS, when (status) {
+                VpnState.Status.CONNECTING -> STATUS_CONNECTING
+                VpnState.Status.CONNECTED -> STATUS_CONNECTED
+                VpnState.Status.FAILED -> STATUS_FAILED
+                VpnState.Status.DISCONNECTED -> STATUS_DISCONNECTED
+            })
+            .putExtra(EXTRA_DETAIL, detail)
+            .apply {
+                if (status == VpnState.Status.CONNECTED) {
+                    val startMs = getSharedPreferences("settings", MODE_PRIVATE)
+                        .getLong("session_start", 0)
+                    putExtra(EXTRA_ELAPSED, (SystemClock.elapsedRealtime() - startMs) / 1000)
+                }
+            })
+    }
+
+    private fun broadcastIpResult(ip: String, countryCode: String) {
+        sendBroadcast(Intent(ACTION_IP_RESULT)
+            .setPackage(packageName)
+            .putExtra(EXTRA_IP, ip)
+            .putExtra(EXTRA_COUNTRY, countryCode))
+    }
+
+    // ── Foreground notification ────────────────────────────────────
+
+    private fun startForegroundCompat() {
+        val channel = NotificationChannel(CHANNEL_ID, getString(R.string.vpn_channel_name),
+            NotificationManager.IMPORTANCE_LOW)
+        (getSystemService(NotificationManager::class.java) as NotificationManager)
+            .createNotificationChannel(channel)
+
+        val n = notification("Starting…")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(NOTIFICATION_ID, n)
+        }
+    }
+
     private fun notification(content: String): Notification {
-        val stopIntent = PendingIntent.getService(
-            this,
-            0,
+        val stopIntent = PendingIntent.getService(this, 0,
             Intent(this, AetherVpnService::class.java).setAction(ACTION_DISCONNECT),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_vpn_status_shield)
             .setContentTitle(getString(R.string.app_name))
@@ -379,28 +387,24 @@ class AetherVpnService : VpnService() {
             .build()
     }
 
-    private fun trafficBytes(bytes: Long): Long =
-        if (bytes == TrafficStats.UNSUPPORTED.toLong()) 0L else bytes
+    // ── Helpers ───────────────────────────────────────────────────
 
-    private fun formatRate(bytesPerSecond: Long): String = when {
-        bytesPerSecond < 1_024 -> "$bytesPerSecond B/s"
-        bytesPerSecond < 1_048_576 -> "${bytesPerSecond / 1_024} KB/s"
-        else -> "${bytesPerSecond / 1_048_576} MB/s"
-    }
+    private fun parseProtocol(config: String) =
+        config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
 
-    private fun formatDuration(seconds: Long): String {
-        val h = seconds / 3600
-        val m = (seconds % 3600) / 60
-        val s = seconds % 60
-        return if (h > 0) "%d:%02d:%02d".format(h, m, s)
-        else "%02d:%02d".format(m, s)
-    }
+    private fun currentRxBytes(): Long = trafficBytes(TrafficStats.getUidRxBytes(applicationInfo.uid))
+    private fun currentTxBytes(): Long = trafficBytes(TrafficStats.getUidTxBytes(applicationInfo.uid))
+    private fun trafficBytes(bytes: Long): Long = if (bytes == TrafficStats.UNSUPPORTED.toLong()) 0L else bytes
 
-    private fun formatData(bytes: Long): String = when {
-        bytes < 1_024 -> "$bytes B"
-        bytes < 1_048_576 -> "${bytes / 1_024} KB"
-        bytes < 1_073_741_824 -> "${bytes / 1_048_576} MB"
-        else -> "%.1f GB".format(bytes.toDouble() / 1_073_741_824.0)
+    private fun killSwitchEnabled() = getSharedPreferences("settings", MODE_PRIVATE)
+        .getBoolean("kill_switch", false)
+    private fun dnsServer() = if (getSharedPreferences("settings", MODE_PRIVATE)
+        .getBoolean("ad_blocker", false)) "94.140.14.14" else "1.1.1.1"
+
+    private fun Builder.applyBypassIran(): Builder {
+        if (!getSharedPreferences("settings", MODE_PRIVATE).getBoolean("bypass_iran", false)) return this
+        IRANIAN_PACKAGES.forEach { try { addDisallowedApplication(it) } catch (_: Exception) {} }
+        return this
     }
 
     private fun Builder.applySplitTunneling(): Builder {
@@ -408,74 +412,68 @@ class AetherVpnService : VpnService() {
         val packages = settings.packages()
         if (settings.mode() == SplitTunnelSettings.Mode.ALL) return this
         if (packages.isEmpty()) {
-            check(settings.mode() != SplitTunnelSettings.Mode.INCLUDE) {
-                "Select at least one app for split tunneling"
-            }
+            check(settings.mode() != SplitTunnelSettings.Mode.INCLUDE) { "Select at least one app" }
             return this
         }
-        packages.forEach { packageName ->
+        packages.forEach { pkg ->
             try {
                 when (settings.mode()) {
-                    SplitTunnelSettings.Mode.INCLUDE -> addAllowedApplication(packageName)
-                    SplitTunnelSettings.Mode.EXCLUDE -> addDisallowedApplication(packageName)
-                    SplitTunnelSettings.Mode.ALL -> Unit
+                    SplitTunnelSettings.Mode.INCLUDE -> addAllowedApplication(pkg)
+                    SplitTunnelSettings.Mode.EXCLUDE -> addDisallowedApplication(pkg)
+                    SplitTunnelSettings.Mode.ALL -> {}
                 }
-            } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
-                ConnectionLog.record("Split tunnel skipped removed app: $packageName")
-            }
+            } catch (_: android.content.pm.PackageManager.NameNotFoundException) {}
         }
-        ConnectionLog.record("Split tunnel ${settings.mode().label.lowercase()}: ${packages.size} app(s)")
         return this
     }
+
+    private fun formatRate(bps: Long): String = when {
+        bps < 1_024 -> "$bps B/s"
+        bps < 1_048_576 -> "${bps / 1_024} KB/s"
+        else -> "${bps / 1_048_576} MB/s"
+    }
+
+    private fun formatDuration(seconds: Long): String {
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
+    }
+
+    // ── Companion ──────────────────────────────────────────────────
 
     companion object {
         const val ACTION_CONNECT = "studio.cluvex.aethery.CONNECT"
         const val ACTION_DISCONNECT = "studio.cluvex.aethery.DISCONNECT"
         const val ACTION_STATUS = "studio.cluvex.aethery.STATUS"
+        const val ACTION_IP_RESULT = "studio.cluvex.aethery.IP_RESULT"
         const val EXTRA_CONFIG = "config"
         const val EXTRA_VPN_MODE = "vpn_mode"
         const val EXTRA_STATUS = "status"
         const val EXTRA_DETAIL = "detail"
+        const val EXTRA_IP = "ip"
+        const val EXTRA_COUNTRY = "country"
         const val EXTRA_ELAPSED = "elapsed"
         const val STATUS_CONNECTING = "connecting"
-        const val STATUS_STARTING = "starting"
-        const val STATUS_SCANNING = "scanning"
         const val STATUS_CONNECTED = "connected"
         const val STATUS_FAILED = "failed"
         const val STATUS_DISCONNECTED = "disconnected"
         private const val CHANNEL_ID = "aethery_vpn"
         private const val NOTIFICATION_ID = 1
-        private const val LOG_TAG = "MSN-VPNVpn"
-        private const val MAX_RECONNECT_ATTEMPTS = 3
+        private const val LOG_TAG = "AetherVpn"
+        private const val MAX_RECONNECT = 3
         private const val RECONNECT_DELAY_MS = 3000L
 
-        /** Called by PsiphonVpnService to protect sockets from AetherVpnService's TUN */
-        @Volatile
-        var socketProtector: ((Int) -> Boolean)? = null
+        /**
+         * CRITICAL: Set by AetherVpnService BEFORE NativeCore.start().
+         * Used by PsiphonVpnService to protect its sockets from the TUN.
+         */
+        @Volatile var socketProtector: ((Int) -> Boolean)? = null
 
         val IRANIAN_PACKAGES = listOf(
-            "ir.divar",
-            "ir.co.bazaar",
-            "com.digikala",
-            "com.snapp",
-            "com.tapsi.ryde",
-            "com.mydigipay.payment",
-            "net.irankish.sb24",
-            "com.sheypoor",
+            "ir.divar", "ir.co.bazaar", "com.digikala", "com.snapp",
+            "com.tapsi.ryde", "com.mydigipay.payment",
+            "net.irankish.sb24", "com.sheypoor",
         )
     }
-}
-
-object ConnectionLog {
-    private const val MAX_ENTRIES = 100
-    private val entries = ArrayDeque<String>()
-
-    @Synchronized
-    fun record(message: String) {
-        if (entries.size == MAX_ENTRIES) entries.removeFirst()
-        entries.addLast("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}  $message")
-    }
-
-    @Synchronized
-    fun snapshot(): List<String> = entries.toList()
 }
