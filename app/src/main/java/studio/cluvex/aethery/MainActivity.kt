@@ -143,17 +143,12 @@ class MainActivity : Activity() {
                 PsiphonVpnService.ACTION_IP_RESULT -> {
                     val ip = intent.getStringExtra(PsiphonVpnService.EXTRA_IP) ?: ""
                     val country = intent.getStringExtra(PsiphonVpnService.EXTRA_COUNTRY) ?: ""
-                    val flag = if (country.length == 2) {
-                        country.uppercase().map { cp ->
-                            String(Character.toChars(0x1F1E6 + (cp - 'A')))
-                        }.joinToString("")
-                    } else ""
-                    val result = when {
-                        ip.isNotEmpty() && flag.isNotEmpty() -> "$flag $ip"
-                        ip.isNotEmpty() -> ip
-                        else -> "IP: unavailable"
-                    }
-                    connectionIp.text = "IP: $result"
+                    // Save to prefs for lifecycle restoration
+                    getSharedPreferences("settings", MODE_PRIVATE).edit()
+                        .putString("last_ip", ip)
+                        .putString("last_country", country)
+                        .apply()
+                    connectionIp.text = buildIpDisplay(ip, country)
                 }
             }
         }
@@ -2096,11 +2091,17 @@ class MainActivity : Activity() {
 
 
     private fun toggleTunnel() {
-        if (NativeCore.isRunning()) {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val coreRunning = NativeCore.isRunning()
+        val psiphonRunning = prefs.getBoolean("psiphon_running", false)
+
+        if (coreRunning || psiphonRunning) {
             // Stop AetherVpnService
-            startService(Intent(this, AetherVpnService::class.java).setAction(AetherVpnService.ACTION_DISCONNECT))
+            if (coreRunning) {
+                startService(Intent(this, AetherVpnService::class.java).setAction(AetherVpnService.ACTION_DISCONNECT))
+            }
             // Also stop Psiphon proxy if running
-            if (getSharedPreferences("settings", MODE_PRIVATE).getBoolean("psiphon_running", false)) {
+            if (psiphonRunning) {
                 startService(Intent(this, PsiphonVpnService::class.java).setAction(PsiphonVpnService.ACTION_DISCONNECT))
             }
             showDisconnected("Disconnecting")
@@ -2195,7 +2196,7 @@ class MainActivity : Activity() {
         put("tls_curve_preset", tlsCurvePreset().coreName)
         put("wireguard_data_check", wireGuardDataCheck())
         if (selectedProtocol == Protocol.PSIPHON && connectionType() == ConnectionType.VPN) {
-            put("upstream_proxy", "127.0.0.1:${psiphonProxyPort()}")
+            put("upstream_proxy", "127.0.0.1:${socksPort() + 1000}")
         }
     }.toString()
 
@@ -2203,13 +2204,18 @@ class MainActivity : Activity() {
 
     private fun renderStatus() {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val coreRunning = NativeCore.isRunning()
         val psiphonRunning = prefs.getBoolean("psiphon_running", false)
-        if (psiphonRunning && prefs.getBoolean("vpn_connected", false)) {
-            // Restore Psiphon connected state from service
-            if (visualState != ConnectionControl.State.CONNECTED) showConnected()
+        val vpnConnected = prefs.getBoolean("vpn_connected", false)
+
+        if (psiphonRunning && vpnConnected && visualState != ConnectionControl.State.CONNECTED) {
+            // Psiphon is connected but UI doesn't know — restore from service state
+            showConnected()
             return
         }
-        if (!NativeCore.isRunning() && visualState == ConnectionControl.State.CONNECTED) showDisconnected()
+        if (!coreRunning && visualState == ConnectionControl.State.CONNECTED) {
+            showDisconnected()
+        }
     }
 
     private fun showConnecting() {
@@ -2243,7 +2249,6 @@ class MainActivity : Activity() {
         connectionTitle.text = "Connected"
         connectionDetail.text = "${selectedProtocol.label} tunnel is active"
         connectionLatency.text = "Tap to measure latency"
-        connectionIp.text = "IP: —"
         connectionTimer.text = ""
         refreshUsageDisplay()
         setModeEnabled(false)
@@ -2251,8 +2256,22 @@ class MainActivity : Activity() {
         // Psiphon fetches IP itself through SOCKS; don't double-fetch
         if (selectedProtocol != Protocol.PSIPHON) fetchPublicIp()
         startTimerUpdates()
+        // Restore IP from prefs if available
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val savedIp = prefs.getString("last_ip", null)
+        val savedCountry = prefs.getString("last_country", null)
+        connectionIp.text = buildIpDisplay(savedIp, savedCountry)
     }
 
+    private fun buildIpDisplay(ip: String?, country: String?): String {
+        if (ip.isNullOrBlank()) return "IP: unavailable"
+        val flag = if (country?.length == 2) {
+            country.uppercase().map { c ->
+                String(Character.toChars(0x1F1E6 + (c - 'A')))
+            }.joinToString("")
+        } else ""
+        return if (flag.isNotEmpty()) "$flag $ip" else ip
+    }
 
     private fun refreshUsageDisplay() {
         val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)

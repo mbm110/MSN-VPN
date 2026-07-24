@@ -106,11 +106,13 @@ class AetherVpnService : VpnService() {
                         .addDnsServer(dnsServer())
                         .applySplitTunneling()
                         .apply { if (!killSwitchEnabled()) allowBypass() }
-                        .applyBypassIran()
-                                            .also { try { it.addDisallowedApplication(packageName) } catch (_: Exception) {} }
-                                            .establish() ?: error("Android could not establish the VPN interface")
-                                            NativeCore.attach(this)
-                                            socketProtector = { fd -> protect(fd) }
+                        // CRITICAL: addDisallowedApplication for THIS app only.
+                        // If running Psiphon as upstream, THIS app must NOT send traffic
+                        // through the TUN, so Psiphon can reach the outside world directly.
+                        .also { try { it.addDisallowedApplication(packageName) } catch (_: Exception) {} }
+                        .establish() ?: error("Android could not establish the VPN interface")
+                    NativeCore.attach(this)
+                    socketProtector = { fd -> protect(fd) }
                     ConnectionLog.record("Scanning gateways for VPN")
                     sendStatus(STATUS_SCANNING)
                     watchReadiness()
