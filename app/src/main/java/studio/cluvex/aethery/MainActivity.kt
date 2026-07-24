@@ -2202,71 +2202,14 @@ class MainActivity : Activity() {
     private fun psiphonProxyPort(): Int = socksPort() + 1000
 
     private fun renderStatus() {
-        // Use unified VpnState — survives Activity lifecycle
-        val state = VpnState.status
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        val isRunning = NativeCore.isRunning() || prefs.getBoolean("psiphon_running", false)
-
-        when (state) {
-            VpnState.Status.CONNECTED -> {
-                if (visualState != ConnectionControl.State.CONNECTED) {
-                    restoreConnectedState()
-                }
-            }
-            VpnState.Status.CONNECTING -> {
-                if (visualState != ConnectionControl.State.CONNECTING) {
-                    showConnecting()
-                }
-            }
-            VpnState.Status.FAILED -> {
-                if (visualState != ConnectionControl.State.FAILED) {
-                    showFailure(VpnState.lastError)
-                }
-            }
-            VpnState.Status.DISCONNECTED -> {
-                if (isRunning && visualState == ConnectionControl.State.CONNECTED) {
-                    // Service still running but we don't know the state yet
-                    return
-                }
-                if (visualState == ConnectionControl.State.CONNECTED) {
-                    showDisconnected()
-                }
-            }
+        val psiphonRunning = prefs.getBoolean("psiphon_running", false)
+        if (psiphonRunning && prefs.getBoolean("vpn_connected", false)) {
+            // Restore Psiphon connected state from service
+            if (visualState != ConnectionControl.State.CONNECTED) showConnected()
+            return
         }
-    }
-
-    private fun restoreConnectedState() {
-        sessionStartTime = SystemClock.elapsedRealtime()
-        visualState = ConnectionControl.State.CONNECTED
-        connectionControl.state = visualState
-        connectionTitle.setTextColor(connected)
-        connectionTitle.text = "Connected"
-        connectionDetail.text = "${selectedProtocol.label} tunnel is active"
-        connectionLatency.text = "Tap to measure latency"
-        connectionTimer.text = ""
-        refreshUsageDisplay()
-        setModeEnabled(false)
-        pingConnection()
-        startTimerUpdates()
-
-        // Show IP and country from VpnState (set by Psiphon or IpFetcher)
-        if (VpnState.ip.isNotEmpty() || VpnState.countryCode.isNotEmpty()) {
-            updateIpDisplay(VpnState.ip, VpnState.countryCode)
-        }
-    }
-
-    private fun updateIpDisplay(ip: String, countryCode: String) {
-        val flag = if (countryCode.length == 2) {
-            countryCode.uppercase().map { cp ->
-                String(Character.toChars(0x1F1E6 + (cp - 'A')))
-            }.joinToString("")
-        } else ""
-        val result = when {
-            ip.isNotEmpty() && flag.isNotEmpty() -> "$flag $ip"
-            ip.isNotEmpty() -> ip
-            else -> "IP: unavailable"
-        }
-        connectionIp.text = "IP: $result"
+        if (!NativeCore.isRunning() && visualState == ConnectionControl.State.CONNECTED) showDisconnected()
     }
 
     private fun showConnecting() {
@@ -2308,8 +2251,7 @@ class MainActivity : Activity() {
         // Psiphon fetches IP itself through SOCKS; don't double-fetch
         if (selectedProtocol != Protocol.PSIPHON) fetchPublicIp()
         startTimerUpdates()
-        // Show IP/country from VpnState if already fetched (Psiphon)
-        updateIpDisplay(VpnState.ip, VpnState.countryCode)
+    }
 
 
     private fun refreshUsageDisplay() {
