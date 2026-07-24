@@ -477,3 +477,17 @@ class AetherVpnService : VpnService() {
         )
     }
 }
+
+object ConnectionLog {
+    private const val MAX_ENTRIES = 100
+    private val entries = ArrayDeque<String>()
+
+    @Synchronized
+    fun record(message: String) {
+        if (entries.size == MAX_ENTRIES) entries.removeFirst()
+        entries.addLast("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}  $message")
+    }
+
+    @Synchronized
+    fun snapshot(): List<String> = entries.toList()
+}
