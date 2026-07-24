@@ -36,6 +36,7 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
         const val ACTION_CONNECT = "studio.cluvex.aethery.psiphon.CONNECT"
         const val ACTION_DISCONNECT = "studio.cluvex.aethery.psiphon.DISCONNECT"
         const val ACTION_READY = "studio.cluvex.aethery.psiphon.READY"
+        const val ACTION_PSIPHON_READY = "studio.cluvex.aethery.psiphon.PSIPHON_READY"
         const val ACTION_IP_RESULT = "studio.cluvex.aethery.psiphon.IP_RESULT"
         const val EXTRA_IP = "ip"
         const val EXTRA_COUNTRY = "country"
@@ -162,9 +163,15 @@ class PsiphonVpnService : Service(), PsiphonTunnel.HostService {
     // ── Broadcast ready for AetherVpnService ────────────────────
 
     private fun broadcastReady() {
+        // Notify MainActivity: SOCKS proxy is open, AetherVpnService can start now
+        sendBroadcast(Intent(ACTION_PSIPHON_READY).apply {
+            putExtra(EXTRA_PORT, socksPort)
+            setPackage(packageName)
+        })
+        // Legacy broadcast for other listeners
         sendBroadcast(Intent(ACTION_READY).apply {
             putExtra(EXTRA_PORT, socksPort)
-            `package` = packageName
+            setPackage(packageName)
         })
     }
 

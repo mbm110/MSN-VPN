@@ -70,6 +70,7 @@ class MainActivity : Activity() {
     private lateinit var appUpdater: AppUpdater
     private var selectedProtocol = Protocol.MASQUE
     private var pendingConfig: String? = null
+    private var psiphonReadyReceived = false
     private var pendingPsiphonStart = false
     private var visualState = ConnectionControl.State.DISCONNECTED
     private var receiverRegistered = false
@@ -149,6 +150,14 @@ class MainActivity : Activity() {
                         .putString("last_country", country)
                         .apply()
                     connectionIp.text = buildIpDisplay(ip, country)
+                }
+                PsiphonVpnService.ACTION_PSIPHON_READY -> {
+                    // Psiphon SOCKS proxy is ready → now start AetherVpnService with TUN
+                    psiphonReadyReceived = true
+                    val config = pendingConfig
+                    if (config != null) {
+                        startAetherVpn(config)
+                    }
                 }
             }
         }
@@ -243,6 +252,7 @@ class MainActivity : Activity() {
         super.onStart()
         val filter = IntentFilter(AetherVpnService.ACTION_STATUS).apply {
             addAction(PsiphonVpnService.ACTION_IP_RESULT)
+            addAction(PsiphonVpnService.ACTION_PSIPHON_READY)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
             registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -2159,15 +2169,20 @@ class MainActivity : Activity() {
 
     private fun connect(config: String) {
         showConnecting()
-        // Psiphon VPN mode: start BOTH services simultaneously
-        // AetherVpnService will poll for Psiphon's SOCKS port before creating TUN
         if (selectedProtocol == Protocol.PSIPHON && connectionType() == ConnectionType.VPN) {
+            // CRITICAL ORDER: Psiphon first, THEN TUN
+            // 1. Start PsiphonVpnService → it connects and opens SOCKS port
+            // 2. Wait for ListeningSocksProxyPort callback → broadcast PSIPHON_READY
+            // 3. Then start AetherVpnService → create TUN → Rust core connects to Psiphon SOCKS
             getSharedPreferences("settings", MODE_PRIVATE).edit()
                 .putBoolean("psiphon_running", true).apply()
+            psiphonReadyReceived = false
+            pendingConfig = config
             startForegroundService(Intent(this, PsiphonVpnService::class.java)
                 .setAction(PsiphonVpnService.ACTION_CONNECT)
-                .putExtra(PsiphonVpnService.EXTRA_PORT, psiphonProxyPort()))
-            startAetherVpn(config)
+                .putExtra(PsiphonVpnService.EXTRA_PORT, socksPort() + 1000))
+            // Schedule timeout: if Psiphon doesn't connect within 30s, give up
+            handler.postDelayed({ if (!psiphonReadyReceived) showFailure("Psiphon connection timeout") }, 30_000)
             return
         }
         startAetherVpn(config)
@@ -2219,6 +2234,10 @@ class MainActivity : Activity() {
     }
 
     private fun showConnecting() {
+        // CRITICAL: timer MUST stay at 00:00 during CONNECTING
+        // User explicitly asked for this: timer only starts when CONNECTED
+        timerHandler.removeCallbacks(timerRunnable)
+        connectionTimer.text = ""
         showConnectionProgress("Connecting", "Starting ${selectedProtocol.label} tunnel")
     }
 
@@ -2311,6 +2330,9 @@ class MainActivity : Activity() {
     }
 
     private fun showDisconnected(detail: String = "Tap the circle to connect") {
+        // Stop timer when disconnected
+        timerHandler.removeCallbacks(timerRunnable)
+        connectionTimer.text = ""
         latencyRequest++
         connectionLatency.text = "Latency unavailable"
         visualState = ConnectionControl.State.DISCONNECTED
