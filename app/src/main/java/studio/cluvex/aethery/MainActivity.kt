@@ -2182,7 +2182,7 @@ class MainActivity : Activity() {
                 .setAction(PsiphonVpnService.ACTION_CONNECT)
                 .putExtra(PsiphonVpnService.EXTRA_PORT, socksPort() + 1000))
             // Schedule timeout: if Psiphon doesn't connect within 30s, give up
-            handler.postDelayed({ if (!psiphonReadyReceived) showFailure("Psiphon connection timeout") }, 30_000)
+            timerHandler.postDelayed({ if (!psiphonReadyReceived) showFailure("Psiphon connection timeout") }, 30_000)
             return
         }
         startAetherVpn(config)
